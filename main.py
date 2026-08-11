@@ -3786,19 +3786,27 @@ async def say(ctx, *, message=None):
 # START BOT
 # ============================================================
 
+import os
+from flask import Flask
+import threading
+
+TOKEN = os.environ.get("TOKEN") # important: get token from Render env
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "VISTO BEAST IS ALIVE"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
 async def main():
-
-    await bot.start(
-        TOKEN
-    )
-
+    # start flask in background thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # start discord bot
+    await bot.start(TOKEN)
 
 if __name__ == "__main__":
-
-    keep_alive()
-
-    Thread(
-        target=lambda: asyncio.run(
-            main()
-        )
-    ).start()
+    asyncio.run(main())

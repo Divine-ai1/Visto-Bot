@@ -281,34 +281,54 @@ def help_embed(guild=None):
     mod_emoji = premium_emoji(guild, "mod", "🛡️")
     ticket_emoji = premium_emoji(guild, "ticket", "🎫")
     giveaway_emoji = premium_emoji(guild, "giveaway", "🎉")
+    arrow = premium_emoji(guild, "arrow", "➡️")
     embed = discord.Embed(
         title=f"{mod_emoji} Visto",
         description=f"All-in-one Discord bot\nPrefix: `{PREFIX}`",
         color=discord.Color.blurple(),
     )
     embed.add_field(
-        name=f"{mod_emoji} Moderation",
-        value="`/ban` ` /unban` `/kick` `/timeout` `/warn` `/warnings` `/delwarn` `/purge` `/lock` `/unlock` `/lockdown` `/unlockdown`",
+        name=f"{arrow} Moderation",
+        value=(
+            f"{arrow} `/ban` `/unban` `/kick` `/timeout`\n"
+            f"{arrow} `/warn` `/warnings` `/delwarn` `/purge`\n"
+            f"{arrow} `/lock` `/unlock` `/lockdown` `/unlockdown`"
+        ),
         inline=False,
     )
     embed.add_field(
-        name="📊 Stats",
-        value="`/messages` `-m` `.m` `-i` `.i` `-lb invites` `-lb messages` `.resetall messages` `.resetall invites`",
+        name=f"{arrow} Stats",
+        value=(
+            f"{arrow} `/messages` `-m` `.m`\n"
+            f"{arrow} `/invites` `-i` `.i`\n"
+            f"{arrow} `-lb invites` `-lb messages`\n"
+            f"{arrow} `.resetall messages` `.resetall invites`"
+        ),
         inline=False,
     )
     embed.add_field(
-        name=f"{ticket_emoji} Tickets",
-        value="`/ticket setup` `/ticket close` `/user add`",
+        name=f"{arrow} Tickets",
+        value=(
+            f"{arrow} `/ticket setup` `/ticket close`\n"
+            f"{arrow} `/user add`"
+        ),
         inline=False,
     )
     embed.add_field(
-        name=f"{giveaway_emoji} Giveaways",
-        value="`/giveaway start` `/giveaway end` `/giveaway reroll` `/giveaway pause` `/giveaway resume` `/giveaway delete`",
+        name=f"{arrow} Giveaways",
+        value=(
+            f"{arrow} `/giveaway start` `/giveaway end`\n"
+            f"{arrow} `/giveaway reroll` `/giveaway pause`\n"
+            f"{arrow} `/giveaway resume` `/giveaway delete`"
+        ),
         inline=False,
     )
     embed.add_field(
-        name="🤖 Utility",
-        value="`.say` `/autoresponder add` `/autoresponder remove` `/autoresponder list`",
+        name=f"{arrow} Utility",
+        value=(
+            f"{arrow} `.say` `/autoresponder add`\n"
+            f"{arrow} `/autoresponder remove` `/autoresponder list`"
+        ),
         inline=False,
     )
     return embed
@@ -352,12 +372,13 @@ def get_daily_message_count(guild_id, user_id):
 
 
 def build_messages_embed(user, count, today_count, channel):
+    arrow = premium_emoji(user.guild, "arrow", "➡️")
     embed = discord.Embed(
-        title=f"📊 {user.display_name}'s Messages",
+        title=f"{arrow} Message COUNT",
         description=(
-            f"**All Time:** `{count:,}` messages\n"
-            f"**Daily:** `{today_count:,}` messages\n\n"
-            f"📍 Counting Channel: {channel.mention if channel else 'Not configured'}"
+            f"{arrow} **All Time Messages:** `{count:,}`\n"
+            f"{arrow} **Daily Messages:** `{today_count:,}`\n\n"
+            f"{arrow} **Counting Channel:** {channel.mention if channel else 'Not configured'}"
         ),
         color=VISTO_COLOR,
     )
@@ -777,14 +798,15 @@ async def on_invite_delete(invite):
 
 
 def build_invite_embed(user, stats):
+    arrow = premium_emoji(user.guild, "arrow", "➡️")
     embed = discord.Embed(
-        title="📨 Invite Log",
+        title=f"{arrow} Invite Tracker",
         description=(
-            f"**{user.display_name}** has **{stats['total']}** active invites\n\n"
-            f"**Joins:** `{stats['joins']}`\n"
-            f"**Fake:** `{stats.get('fake', 0)}`\n"
-            f"**Left:** `{stats['left']}`\n"
-            f"**Rejoins:** `{stats['rejoins']}`"
+            f"{arrow} **Active Invites:** `{stats['total']}`\n\n"
+            f"{arrow} **Joins:** `{stats['joins']}`\n"
+            f"{arrow} **Fake:** `{stats.get('fake', 0)}`\n"
+            f"{arrow} **Left:** `{stats['left']}`\n"
+            f"{arrow} **Rejoins:** `{stats['rejoins']}`"
         ),
         color=VISTO_COLOR,
     )
@@ -1513,18 +1535,19 @@ def create_giveaway_embed(data, guild=None):
         description=data.get("description") or f"Click **{giveaway_emoji} Enter Giveaway** to participate!",
         color=int(data.get("color", 15844367)),
     )
-    embed.add_field(name="🎁 Prize", value=data["prize"], inline=False)
-    embed.add_field(name="🏆 Winners", value=str(data["winners"]), inline=True)
-    embed.add_field(name="👤 Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
-    embed.add_field(name="👥 Entries", value=str(len(data.get("entries", []))), inline=True)
-    embed.add_field(name="👤 Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
-    embed.add_field(name="⏰ Ends", value=f"<t:{end_time}:R>", inline=True)
+    arrow = premium_emoji(guild, "arrow", "➡️")
+    embed.add_field(name=f"{arrow} Prize", value=data["prize"], inline=False)
+    embed.add_field(name=f"{arrow} Winners", value=str(data["winners"]), inline=True)
+    embed.add_field(name=f"{arrow} Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
+    embed.add_field(name=f"{arrow} Entries", value=str(len(data.get("entries", []))), inline=True)
+    embed.add_field(name=f"{arrow} Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
+    embed.add_field(name=f"{arrow} Ends", value=f"<t:{end_time}:R>", inline=True)
     if data.get("required_role_id"):
-        embed.add_field(name="🎭 Required Role", value=f"<@&{data['required_role_id']}>", inline=True)
+        embed.add_field(name=f"{arrow} Required Role", value=f"<@&{data['required_role_id']}>", inline=True)
     if data.get("blacklisted_role_id"):
-        embed.add_field(name="🚫 Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>", inline=True)
+        embed.add_field(name=f"{arrow} Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>", inline=True)
     if data.get("extra_role_id") and int(data.get("extra_entries", 0)) > 0:
-        embed.add_field(name="✨ Extra Entries", value=f"<@&{data['extra_role_id']}> = {data['extra_entries']} total entries", inline=False)
+        embed.add_field(name=f"{arrow} Extra Entries", value=f"<@&{data['extra_role_id']}> = {data['extra_entries']} total entries", inline=False)
     if data.get("image"):
         embed.set_image(url=data["image"])
     if data.get("thumbnail"):
@@ -1540,8 +1563,8 @@ class GiveawayParticipantsView(discord.ui.View):
         self.guild = guild
         self.page = page
         self.per_page = 10
-        self.previous.emoji = premium_emoji(guild, "arrow", "◀")
-        self.next.emoji = premium_emoji(guild, "arrow", "▶")
+        self.previous.emoji = premium_emoji(guild, "arrow", "➡️")
+        self.next.emoji = premium_emoji(guild, "arrow", "➡️")
         self.refresh_buttons()
 
     def rows(self):
@@ -1571,7 +1594,7 @@ class GiveawayParticipantsView(discord.ui.View):
         chunk = rows[self.page * self.per_page:(self.page + 1) * self.per_page]
         lines = []
         for index, (uid, amount, _) in enumerate(chunk, start=self.page * self.per_page + 1):
-            lines.append(f"**#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
+            lines.append(f"{premium_emoji(self.guild, 'arrow', '➡️')} **#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
         if not lines:
             lines = ["No participants yet."]
         embed = discord.Embed(
@@ -1579,8 +1602,9 @@ class GiveawayParticipantsView(discord.ui.View):
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Total Participants", value=str(len(rows)), inline=True)
-        embed.add_field(name="Total Entries", value=str(len(data.get("entries", []))), inline=True)
+        arrow = premium_emoji(self.guild, "arrow", "➡️")
+        embed.add_field(name=f"{arrow} Total Participants", value=str(len(rows)), inline=True)
+        embed.add_field(name=f"{arrow} Total Entries", value=str(len(data.get("entries", []))), inline=True)
         embed.set_footer(text=f"Page {self.page + 1}/{pages}")
         return embed
 
@@ -1588,12 +1612,12 @@ class GiveawayParticipantsView(discord.ui.View):
         self.refresh_buttons()
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
-    @discord.ui.button(label="Previous", emoji="◀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Previous", emoji="➡️", style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
         self.page = max(0, self.page - 1)
         await self.update(interaction)
 
-    @discord.ui.button(label="Next", emoji="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         self.page = min(self.pages() - 1, self.page + 1)
         await self.update(interaction)

@@ -152,8 +152,8 @@ PREMIUM_EMOJI_IDS = {
 PREMIUM_EMOJI_MARKUP = {
     "ticket": "<:ticket:1537091039515385866>",
     "mod": "<:mod:1537091003306213416>",
-    "arrow": "<:arrow:1537091085069844551>",
-    "giveaway": "<:giveaway:1537091136244678716>",
+    "arrow": "<a:vistoarrow:1537091085069844551>",
+    "giveaway": "<a:giveaway:1537091136244678716>",
 }
 
 def premium_emoji(guild, name, fallback=""):

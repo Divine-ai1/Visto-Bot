@@ -149,16 +149,22 @@ PREMIUM_EMOJI_IDS = {
 }
 
 
+PREMIUM_EMOJI_MARKUP = {
+    "ticket": "<:ticket:1537091039515385866>",
+    "mod": "<:mod:1537091003306213416>",
+    "arrow": "<:arrow:1537091085069844551>",
+    "giveaway": "<:giveaway:1537091136244678716>",
+}
+
 def premium_emoji(guild, name, fallback=""):
-    """Return the exact premium custom emoji by its Discord ID."""
-    emoji_id = PREMIUM_EMOJI_IDS.get(name)
-    if emoji_id:
-        # PartialEmoji renders as the exact <:name:id> custom emoji.
-        return str(discord.PartialEmoji(
-            name=name,
-            id=emoji_id,
-            animated=False,
-        ))
+    """Return the exact Discord custom-emoji markup for embed/message text."""
+    return PREMIUM_EMOJI_MARKUP.get(name, fallback)
+
+def premium_emoji_obj(guild, name, fallback=""):
+    """Return the exact Discord custom emoji object for buttons/components."""
+    markup = PREMIUM_EMOJI_MARKUP.get(name)
+    if markup:
+        return discord.PartialEmoji.from_str(markup)
     return fallback
 
 
@@ -396,8 +402,8 @@ class MessageLeaderboardView(discord.ui.View):
         self.guild = ctx.guild
         self.page = 0
         self.per_page = 10
-        self.previous.emoji = premium_emoji(self.guild, "arrow", "◀")
-        self.next.emoji = premium_emoji(self.guild, "arrow", "▶")
+        self.previous.emoji = premium_emoji_obj(self.guild, "arrow", "◀")
+        self.next.emoji = premium_emoji_obj(self.guild, "arrow", "▶")
         self.refresh_buttons()
 
     def rows(self):
@@ -1263,9 +1269,9 @@ class TicketPanelView(discord.ui.View):
     def __init__(self, guild=None):
         super().__init__(timeout=None)
         self.guild = guild
-        self.buy.emoji = premium_emoji(guild, "ticket", "🛒")
-        self.claim.emoji = premium_emoji(guild, "ticket", "🎁")
-        self.support.emoji = premium_emoji(guild, "ticket", "🛠️")
+        self.buy.emoji = premium_emoji_obj(guild, "ticket", "🛒")
+        self.claim.emoji = premium_emoji_obj(guild, "ticket", "🎁")
+        self.support.emoji = premium_emoji_obj(guild, "ticket", "🛠️")
 
     async def create_ticket(self, interaction, kind, emoji_name):
         guild = interaction.guild
@@ -1336,8 +1342,8 @@ class TicketControlsView(discord.ui.View):
     def __init__(self, guild=None):
         super().__init__(timeout=None)
         self.guild = guild
-        self.claim_ticket.emoji = premium_emoji(guild, "ticket", "👤")
-        self.close.emoji = premium_emoji(guild, "ticket", "🔒")
+        self.claim_ticket.emoji = premium_emoji_obj(guild, "ticket", "👤")
+        self.close.emoji = premium_emoji_obj(guild, "ticket", "🔒")
 
     @discord.ui.button(label="Claim Ticket", emoji="👤", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
     async def claim_ticket(self, interaction, button):
@@ -1366,7 +1372,7 @@ class TicketControlsView(discord.ui.View):
                 )
             ticket_data["claimed_by"] = None
             save_database()
-            self.claim_ticket.emoji = premium_emoji(interaction.guild, "ticket", "👤")
+            self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket", "👤")
             button.label = "Claim Ticket"
             embed = discord.Embed(
                 title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Unclaimed",
@@ -1379,7 +1385,7 @@ class TicketControlsView(discord.ui.View):
 
         ticket_data["claimed_by"] = interaction.user.id
         save_database()
-        self.claim_ticket.emoji = premium_emoji(interaction.guild, "ticket", "👤")
+        self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket", "👤")
         button.label = "Claimed"
         embed = discord.Embed(
             title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed",
@@ -1523,8 +1529,12 @@ giveaway_tasks = {}
 
 
 def giveaway_entry_counts(data):
+    """Return {user_id: number_of_entries} for both old and new database formats."""
     counts = {}
-    for uid in data.get("entries", []):
+    entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        entries = list(entries)
+    for uid in entries:
         key = str(uid)
         counts[key] = counts.get(key, 0) + 1
     return counts
@@ -1542,7 +1552,7 @@ def create_giveaway_embed(data, guild=None):
     embed.add_field(name=f"{arrow} Prize", value=data["prize"], inline=False)
     embed.add_field(name=f"{arrow} Winners", value=str(data["winners"]), inline=True)
     embed.add_field(name=f"{arrow} Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
-    embed.add_field(name=f"{arrow} Entries", value=str(len(data.get("entries", []))), inline=True)
+    embed.add_field(name=f"{arrow} Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
     embed.add_field(name=f"{arrow} Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
     embed.add_field(name=f"{arrow} Ends", value=f"<t:{end_time}:R>", inline=True)
     if data.get("required_role_id"):
@@ -1566,8 +1576,8 @@ class GiveawayParticipantsView(discord.ui.View):
         self.guild = guild
         self.page = page
         self.per_page = 10
-        self.previous.emoji = premium_emoji(guild, "arrow", "➡️")
-        self.next.emoji = premium_emoji(guild, "arrow", "➡️")
+        self.previous.emoji = premium_emoji_obj(guild, "arrow", "➡️")
+        self.next.emoji = premium_emoji_obj(guild, "arrow", "➡️")
         self.refresh_buttons()
 
     def rows(self):
@@ -1607,7 +1617,7 @@ class GiveawayParticipantsView(discord.ui.View):
         )
         arrow = premium_emoji(self.guild, "arrow", "➡️")
         embed.add_field(name=f"{arrow} Total Participants", value=str(len(rows)), inline=True)
-        embed.add_field(name=f"{arrow} Total Entries", value=str(len(data.get("entries", []))), inline=True)
+        embed.add_field(name=f"{arrow} Total Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
         embed.set_footer(text=f"Page {self.page + 1}/{pages}")
         return embed
 
@@ -1630,8 +1640,8 @@ class GiveawayView(discord.ui.View):
     def __init__(self, disabled=False, guild=None):
         super().__init__(timeout=None)
         self.guild = guild
-        self.enter_button.emoji = premium_emoji(guild, "giveaway", "🎉")
-        self.participants.emoji = premium_emoji(guild, "giveaway", "🎉")
+        self.enter_button.emoji = premium_emoji_obj(guild, "giveaway", "🎉")
+        self.participants.emoji = premium_emoji_obj(guild, "giveaway", "🎉")
         self.enter_button.disabled = disabled
 
     @discord.ui.button(label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
@@ -1672,15 +1682,15 @@ class GiveawayView(discord.ui.View):
 
         # The old code saved the entry but never edited the public giveaway
         # message, so its displayed count stayed at 0. Refresh it immediately.
-        self.enter_button.emoji = premium_emoji(interaction.guild, "giveaway", "🎉")
-        self.participants.emoji = premium_emoji(interaction.guild, "giveaway", "🎉")
+        self.enter_button.emoji = premium_emoji_obj(interaction.guild, "giveaway", "🎉")
+        self.participants.emoji = premium_emoji_obj(interaction.guild, "giveaway", "🎉")
         try:
             await interaction.message.edit(embed=create_giveaway_embed(data, interaction.guild), view=self)
         except (discord.NotFound, discord.HTTPException):
             pass
         await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or f"You entered the giveaway! {premium_emoji(interaction.guild, 'giveaway', '🎉')}"), ephemeral=True)
 
-    @discord.ui.button(label="Participants", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
+    @discord.ui.button(label="Participants", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
     async def participants(self, interaction, button):
         data = db["giveaways"].get(str(interaction.message.id))
         if not data:
@@ -1824,7 +1834,7 @@ async def giveaway_start(
         "min_account_age_days": min_account_age_days,
         "min_server_days": min_server_days,
         "winner_dm": winner_dm,
-        "entry_confirmation": "You entered the giveaway! 🎉",
+        "entry_confirmation": "You entered the giveaway!",
         "entries": [],
         "winners_selected": [],
         "end_time": datetime.now(timezone.utc).timestamp() + seconds,

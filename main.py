@@ -1670,6 +1670,26 @@ bot.tree.add_command(giveaway_group)
 
 
 # ============================================================
+# /STATS
+# ============================================================
+
+stats_group = app_commands.Group(
+    name="stats",
+    description="Manage message and invite statistics"
+)
+
+# ...paste the rest of the code here...
+
+
+bot.tree.add_command(stats_group)
+
+
+# ============================================================
+# NEXT SECTION
+# ============================================================
+
+
+# ============================================================
 # LEADERBOARD SHORTCUTS
 # ============================================================
 
@@ -1729,61 +1749,2589 @@ async def set_ticket_categories(interaction, buy: discord.CategoryChannel, claim
 
 
 # ============================================================
-# DASHBOARD — FILE PASSWORD, HEALTH ENDPOINT
+# PROFESSIONAL VISTO BOT DASHBOARD
 # ============================================================
 
 _dashboard_server = None
 
 
-def dashboard_page(title, body):
-    return f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title><style>body{{font-family:Arial,sans-serif;background:#111827;color:#f9fafb;margin:0;padding:24px}}.wrap{{max-width:1100px;margin:auto}}.card{{background:#1f2937;border:1px solid #374151;border-radius:14px;padding:18px;margin:14px 0}}input{{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border-radius:8px;border:1px solid #4b5563;background:#111827;color:#fff}}button{{padding:10px 16px;border:0;border-radius:8px;background:#5865f2;color:white;cursor:pointer}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}.muted{{color:#9ca3af}}</style></head><body><div class='wrap'>{body}</div></body></html>"""
+# ------------------------------------------------------------
+# DATABASE BACKUP
+# ------------------------------------------------------------
+
+def dashboard_backup_database():
+    try:
+        if os.path.exists(DB_FILE):
+            backup_name = (
+                f"{DB_FILE}.backup"
+            )
+
+            with open(
+                DB_FILE,
+                "rb"
+            ) as source:
+
+                with open(
+                    backup_name,
+                    "wb"
+                ) as backup:
+
+                    backup.write(
+                        source.read()
+                    )
+
+    except Exception as error:
+        print(
+            f"Dashboard backup error: {error}"
+        )
 
 
-class DashboardHandler(BaseHTTPRequestHandler):
+# ------------------------------------------------------------
+# HTML
+# ------------------------------------------------------------
+
+def dashboard_page(
+    title,
+    body,
+    guild_id=None
+):
+
+    navigation = f"""
+    <aside class="sidebar">
+
+        <div class="brand">
+            <div class="brand-icon">V</div>
+            <div>
+                <div class="brand-name">
+                    Visto Bot
+                </div>
+                <div class="brand-sub">
+                    Control Panel
+                </div>
+            </div>
+        </div>
+
+        <a href="?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🏠 Overview
+        </a>
+
+        <a href="/settings?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            ⚙️ Server Settings
+        </a>
+
+        <a href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🛡️ Moderation
+        </a>
+
+        <a href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🎉 Giveaways
+        </a>
+
+        <a href="/tickets?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🎫 Tickets
+        </a>
+
+        <a href="/autoresponders?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🤖 Autoresponders
+        </a>
+
+        <a href="/statistics?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            📊 Statistics
+        </a>
+
+        <div class="sidebar-bottom">
+            <a href="/health" class="nav-link">
+                🟢 Bot Health
+            </a>
+        </div>
+
+    </aside>
+    """
+
+    return f"""
+<!doctype html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>
+{html.escape(title)} • Visto Bot
+</title>
+
+<style>
+
+* {{
+    box-sizing: border-box;
+}}
+
+body {{
+    margin: 0;
+    font-family:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    background:
+        #0b1020;
+
+    color:
+        #f8fafc;
+}}
+
+a {{
+    text-decoration: none;
+}}
+
+.layout {{
+    display: flex;
+    min-height: 100vh;
+}}
+
+.sidebar {{
+    width: 250px;
+    background: #0f172a;
+    border-right: 1px solid #1e293b;
+    padding: 24px 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+}}
+
+.brand {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 30px;
+    padding: 8px;
+}}
+
+.brand-icon {{
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(
+        135deg,
+        #6366f1,
+        #8b5cf6
+    );
+    font-weight: 900;
+    font-size: 20px;
+}}
+
+.brand-name {{
+    font-weight: 800;
+    font-size: 17px;
+}}
+
+.brand-sub {{
+    color: #64748b;
+    font-size: 12px;
+    margin-top: 2px;
+}}
+
+.nav-link {{
+    display: block;
+    color: #cbd5e1;
+    padding: 12px 14px;
+    border-radius: 10px;
+    margin-bottom: 5px;
+    transition: 0.15s;
+}}
+
+.nav-link:hover {{
+    background: #1e293b;
+    color: white;
+}}
+
+.sidebar-bottom {{
+    margin-top: 25px;
+    padding-top: 20px;
+    border-top: 1px solid #1e293b;
+}}
+
+.main {{
+    margin-left: 250px;
+    width: calc(100% - 250px);
+    padding: 30px;
+}}
+
+.topbar {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 28px;
+}}
+
+.page-title {{
+    font-size: 28px;
+    font-weight: 800;
+}}
+
+.page-subtitle {{
+    color: #94a3b8;
+    margin-top: 5px;
+}}
+
+.server-select {{
+    background: #111827;
+    border: 1px solid #334155;
+    color: white;
+    padding: 11px 14px;
+    border-radius: 10px;
+    min-width: 240px;
+}}
+
+.stats-grid {{
+    display: grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(190px, 1fr)
+        );
+    gap: 15px;
+    margin-bottom: 20px;
+}}
+
+.stat-card {{
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 15px;
+    padding: 18px;
+}}
+
+.stat-label {{
+    color: #94a3b8;
+    font-size: 13px;
+}}
+
+.stat-value {{
+    font-size: 28px;
+    font-weight: 800;
+    margin-top: 7px;
+}}
+
+.grid {{
+    display: grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(330px, 1fr)
+        );
+    gap: 18px;
+}}
+
+.card {{
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 15px;
+    padding: 20px;
+}}
+
+.card h2 {{
+    margin-top: 0;
+    margin-bottom: 5px;
+    font-size: 18px;
+}}
+
+.muted {{
+    color: #94a3b8;
+    font-size: 13px;
+}}
+
+label {{
+    display: block;
+    color: #cbd5e1;
+    font-size: 13px;
+    margin-top: 14px;
+    margin-bottom: 6px;
+}}
+
+input,
+select,
+textarea {{
+    width: 100%;
+    background: #0b1220;
+    border: 1px solid #334155;
+    border-radius: 9px;
+    padding: 11px;
+    color: white;
+    outline: none;
+}}
+
+textarea {{
+    resize: vertical;
+    min-height: 90px;
+}}
+
+input:focus,
+select:focus,
+textarea:focus {{
+    border-color: #6366f1;
+}}
+
+button,
+.btn {{
+    display: inline-block;
+    border: 0;
+    border-radius: 9px;
+    padding: 11px 16px;
+    background: #6366f1;
+    color: white;
+    cursor: pointer;
+    font-weight: 700;
+    margin-top: 14px;
+}}
+
+.btn-danger {{
+    background: #dc2626;
+}}
+
+.btn-success {{
+    background: #16a34a;
+}}
+
+.btn-secondary {{
+    background: #334155;
+}}
+
+hr {{
+    border: 0;
+    border-top: 1px solid #1e293b;
+    margin: 20px 0;
+}}
+
+.notice {{
+    background: #172554;
+    border: 1px solid #1d4ed8;
+    color: #bfdbfe;
+    padding: 13px;
+    border-radius: 10px;
+    margin-bottom: 18px;
+}}
+
+.warning {{
+    background: #451a03;
+    border: 1px solid #92400e;
+    color: #fed7aa;
+    padding: 13px;
+    border-radius: 10px;
+    margin-bottom: 18px;
+}}
+
+table {{
+    width: 100%;
+    border-collapse: collapse;
+}}
+
+th,
+td {{
+    text-align: left;
+    padding: 11px;
+    border-bottom: 1px solid #1e293b;
+}}
+
+th {{
+    color: #94a3b8;
+    font-size: 12px;
+}}
+
+@media (
+    max-width: 800px
+) {{
+
+    .sidebar {{
+        position: static;
+        width: 100%;
+        height: auto;
+    }}
+
+    .layout {{
+        display: block;
+    }}
+
+    .main {{
+        margin-left: 0;
+        width: 100%;
+        padding: 18px;
+    }}
+
+    .topbar {{
+        flex-direction: column;
+        align-items: stretch;
+    }}
+
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="layout">
+
+{navigation}
+
+<main class="main">
+
+{body}
+
+</main>
+
+</div>
+
+</body>
+
+</html>
+"""
+
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+def dashboard_guild_from_id(
+    guild_id
+):
+
+    try:
+
+        return bot.get_guild(
+            int(guild_id)
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        return None
+
+
+def dashboard_guild_select(
+    selected=None
+):
+
+    options = []
+
+    for guild in bot.guilds:
+
+        selected_text = (
+            " selected"
+            if selected
+            and int(selected) == guild.id
+            else ""
+        )
+
+        options.append(
+            f"""
+<option value="{guild.id}"{selected_text}>
+{html.escape(guild.name)}
+</option>
+"""
+        )
+
+    return "".join(options)
+
+
+def dashboard_run(coro):
+
+    future = asyncio.run_coroutine_threadsafe(
+        coro,
+        bot.loop
+    )
+
+    return future.result(
+        timeout=30
+    )
+
+
+# ============================================================
+# MODERATION COROUTINES
+# ============================================================
+
+async def dashboard_ban(
+    guild,
+    user_id,
+    reason
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    try:
+
+        await safe_dm(
+            user,
+            discord.Embed(
+                title="🔨 You were banned",
+                description=(
+                    f'You were banned from '
+                    f'**{guild.name}** for "{reason}".'
+                ),
+                color=discord.Color.red()
+            )
+        )
+
+        await user.ban(
+            reason=reason
+        )
+
+        await send_log(
+            guild,
+            "🔨 Member Banned",
+            (
+                f"**Member:** {user.mention}\n"
+                f"**Reason:** {reason}\n"
+                "**Source:** Dashboard"
+            ),
+            discord.Color.red()
+        )
+
+        return True, "Member banned successfully."
+
+    except discord.Forbidden:
+
+        return False, "I do not have permission to ban that member."
+
+    except discord.HTTPException as error:
+
+        return False, str(error)
+
+
+async def dashboard_kick(
+    guild,
+    user_id,
+    reason
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    try:
+
+        await safe_dm(
+            user,
+            discord.Embed(
+                title="👢 You were kicked",
+                description=(
+                    f'You were kicked from '
+                    f'**{guild.name}** for "{reason}".'
+                ),
+                color=discord.Color.orange()
+            )
+        )
+
+        await user.kick(
+            reason=reason
+        )
+
+        await send_log(
+            guild,
+            "👢 Member Kicked",
+            (
+                f"**Member:** {user.mention}\n"
+                f"**Reason:** {reason}\n"
+                "**Source:** Dashboard"
+            ),
+            discord.Color.orange()
+        )
+
+        return True, "Member kicked successfully."
+
+    except discord.Forbidden:
+
+        return False, "I do not have permission to kick that member."
+
+    except discord.HTTPException as error:
+
+        return False, str(error)
+
+
+async def dashboard_warn(
+    guild,
+    user_id,
+    reason,
+    moderator_id
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    warnings = get_guild_data(
+        "warnings",
+        guild.id
+    )
+
+    uid = str(
+        user.id
+    )
+
+    warnings.setdefault(
+        uid,
+        []
+    )
+
+    warnings[uid].append(
+        {
+            "reason": reason,
+            "moderator": int(moderator_id),
+            "timestamp": int(
+                datetime.now(
+                    timezone.utc
+                ).timestamp()
+            ),
+        }
+    )
+
+    save_database()
+
+    await safe_dm(
+        user,
+        discord.Embed(
+            title="⚠️ You were warned",
+            description=(
+                f'You were warned in '
+                f'**{guild.name}** for "{reason}".'
+            ),
+            color=discord.Color.orange()
+        )
+    )
+
+    await send_log(
+        guild,
+        "⚠️ Member Warned",
+        (
+            f"**Member:** {user.mention}\n"
+            f"**Reason:** {reason}\n"
+            "**Source:** Dashboard"
+        ),
+        discord.Color.orange()
+    )
+
+    return True, "Member warned successfully."
+
+
+# ============================================================
+# GIVEAWAY COROUTINE
+# ============================================================
+
+async def dashboard_create_giveaway(
+    guild,
+    channel,
+    prize,
+    duration,
+    winners,
+    host
+):
+
+    seconds = duration_parser(
+        duration
+    )
+
+    if (
+        seconds is None
+        or seconds < 60
+        or seconds > 365 * 86400
+    ):
+
+        return False, "Invalid duration."
+
+    if winners < 1 or winners > 100:
+
+        return False, "Winners must be between 1 and 100."
+
+    data = {
+
+        "guild_id":
+            guild.id,
+
+        "channel_id":
+            channel.id,
+
+        "prize":
+            prize,
+
+        "winners":
+            winners,
+
+        "host_id":
+            guild.me.id,
+
+        "host_text":
+            host,
+
+        "description":
+            None,
+
+        "image":
+            None,
+
+        "thumbnail":
+            None,
+
+        "required_role_id":
+            None,
+
+        "blacklisted_role_id":
+            None,
+
+        "extra_role_id":
+            None,
+
+        "extra_entries":
+            0,
+
+        "min_account_age_days":
+            0,
+
+        "min_server_days":
+            0,
+
+        "winner_dm":
+            None,
+
+        "entry_confirmation":
+            "You entered the giveaway! 🎉",
+
+        "entries":
+            [],
+
+        "winners_selected":
+            [],
+
+        "end_time":
+            datetime.now(
+                timezone.utc
+            ).timestamp() + seconds,
+
+        "ended":
+            False,
+
+        "paused":
+            False,
+
+        "duration":
+            duration,
+    }
+
+    message = await channel.send(
+        embed=create_giveaway_embed(
+            data
+        ),
+        view=GiveawayView()
+    )
+
+    db["giveaways"][
+        str(message.id)
+    ] = data
+
+    save_database()
+
+    start_giveaway_task(
+        message.id
+    )
+
+    await send_log(
+        guild,
+        "🎉 Giveaway Started",
+        (
+            f"**Prize:** {prize}\n"
+            f"**Winners:** {winners}\n"
+            f"**Duration:** {duration}\n"
+            "**Source:** Dashboard"
+        ),
+        discord.Color.gold()
+    )
+
+    return True, (
+        f"Giveaway created in "
+        f"{channel.mention}."
+    )
+
+
+# ============================================================
+# DASHBOARD HANDLER
+# ============================================================
+
+class DashboardHandler(
+    BaseHTTPRequestHandler
+):
+
     def _auth_ok(self):
-        query = parse_qs(urlparse(self.path).query)
-        return query.get("key", [None])[0] == DASHBOARD_PASSWORD
 
-    def _send(self, status, body, content_type="text/html; charset=utf-8"):
-        data = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        query = parse_qs(
+            urlparse(
+                self.path
+            ).query
+        )
+
+        return (
+            query.get(
+                "key",
+                [None]
+            )[0]
+            == DASHBOARD_PASSWORD
+        )
+
+    def _send(
+        self,
+        status,
+        body,
+        content_type="text/html; charset=utf-8"
+    ):
+
+        data = body.encode(
+            "utf-8"
+        )
+
+        self.send_response(
+            status
+        )
+
+        self.send_header(
+            "Content-Type",
+            content_type
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(len(data))
+        )
+
         self.end_headers()
-        self.wfile.write(data)
+
+        self.wfile.write(
+            data
+        )
+
+    def _redirect(
+        self,
+        location
+    ):
+
+        self.send_response(
+            302
+        )
+
+        self.send_header(
+            "Location",
+            location
+        )
+
+        self.end_headers()
+
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
-            return self._send(200, "OK", "text/plain")
-        if not self._auth_ok():
-            return self._send(401, "Unauthorized. Add ?key=YOUR_DASHBOARD_PASSWORD")
-        rows = []
-        for guild in bot.guilds:
-            settings = get_guild_data("settings", guild.id)
-            rows.append(
-                f"<div class='card'><h2>{html.escape(guild.name)}</h2>"
-                f"<p>Guild ID: <code>{guild.id}</code></p>"
-                f"<p>General: <code>{settings.get('general_channel', GENERAL_CHANNEL_ID)}</code></p>"
-                f"<p>Log: <code>{settings.get('log_channel', 'Not set')}</code></p></div>"
-            )
-        body = f"<h1>Visto Dashboard</h1><p class='muted'>Use /setgeneral, /setlog and /set_ticket_categories from Discord. Password is configured in main.py.</p>{''.join(rows) or '<div class=card>No guilds connected.</div>'}"
-        return self._send(200, dashboard_page("Visto Dashboard", body))
 
-    def log_message(self, format, *args):
+        path = urlparse(
+            self.path
+        ).path
+
+        # UptimeRobot
+        if path == "/health":
+
+            return self._send(
+                200,
+                "OK",
+                "text/plain"
+            )
+
+        if not self._auth_ok():
+
+            return self._send(
+                401,
+                "Unauthorized. Add ?key=YOUR_DASHBOARD_PASSWORD"
+            )
+
+        query = parse_qs(
+            urlparse(
+                self.path
+            ).query
+        )
+
+        guild_id = (
+            query.get(
+                "guild_id",
+                [None]
+            )[0]
+        )
+
+        guild = (
+            dashboard_guild_from_id(
+                guild_id
+            )
+            if guild_id
+            else (
+                bot.guilds[0]
+                if bot.guilds
+                else None
+            )
+        )
+
+        # ====================================================
+        # OVERVIEW
+        # ====================================================
+
+        if path in (
+            "/",
+            "/dashboard"
+        ):
+
+            guild_count = len(
+                bot.guilds
+            )
+
+            total_members = sum(
+                guild.member_count or 0
+                for guild in bot.guilds
+            )
+
+            total_giveaways = sum(
+                len(data)
+                for data in db.get(
+                    "giveaways",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            total_tickets = sum(
+                len(data)
+                for data in db.get(
+                    "tickets",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            total_responders = sum(
+                len(data)
+                for data in db.get(
+                    "autoresponders",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            selected = (
+                guild.id
+                if guild
+                else ""
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Dashboard
+</div>
+
+<div class="page-subtitle">
+Manage Visto Bot from one place.
+</div>
+
+</div>
+
+<select class="server-select"
+onchange="location='/?key={html.escape(DASHBOARD_PASSWORD)}&guild_id='+this.value">
+
+{dashboard_guild_select(selected)}
+
+</select>
+
+</div>
+
+<div class="stats-grid">
+
+<div class="stat-card">
+<div class="stat-label">Servers</div>
+<div class="stat-value">
+{guild_count}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Members</div>
+<div class="stat-value">
+{total_members:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Giveaways</div>
+<div class="stat-value">
+{total_giveaways}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Tickets</div>
+<div class="stat-value">
+{total_tickets}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Autoresponders</div>
+<div class="stat-value">
+{total_responders}
+</div>
+</div>
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+
+<h2>⚡ Quick Actions</h2>
+
+<p class="muted">
+Use the sections on the left to manage your server.
+</p>
+
+<a class="btn"
+href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
+🎉 Create Giveaway
+</a>
+
+<a class="btn btn-secondary"
+href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
+🛡️ Moderation
+</a>
+
+</div>
+
+<div class="card">
+
+<h2>🟢 Bot Status</h2>
+
+<p>
+<strong>Online:</strong>
+✅
+</p>
+
+<p>
+<strong>Bot:</strong>
+Visto Bot
+</p>
+
+<p>
+<strong>Connected Guilds:</strong>
+{guild_count}
+</p>
+
+<p>
+<strong>Health:</strong>
+<a href="/health">OK</a>
+</p>
+
+</div>
+
+</div>
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Dashboard",
+                    body,
+                    selected
+                )
+            )
+
+        # ====================================================
+        # SETTINGS
+        # ====================================================
+
+        if path == "/settings":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            settings = get_guild_data(
+                "settings",
+                guild.id
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Server Settings
+</div>
+
+<div class="page-subtitle">
+Configure Visto Bot for {html.escape(guild.name)}
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<form method="POST"
+action="/settings?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+General Message Channel ID
+</label>
+
+<input
+name="general_channel"
+value="{settings.get('general_channel', GENERAL_CHANNEL_ID)}"
+>
+
+<label>
+Log Channel ID
+</label>
+
+<input
+name="log_channel"
+value="{settings.get('log_channel', '')}"
+>
+
+<label>
+Buy Ticket Category ID
+</label>
+
+<input
+name="buy_category"
+value="{settings.get('ticket_buy_category', BUY_CATEGORY_ID)}"
+>
+
+<label>
+Claim Ticket Category ID
+</label>
+
+<input
+name="claim_category"
+value="{settings.get('ticket_claim_category', CLAIM_CATEGORY_ID)}"
+>
+
+<label>
+Support Ticket Category ID
+</label>
+
+<input
+name="support_category"
+value="{settings.get('ticket_support_category', SUPPORT_CATEGORY_ID)}"
+>
+
+<label>
+Ticket Staff Role ID
+</label>
+
+<input
+name="staff_role"
+value="{settings.get('ticket_staff_role', TICKET_STAFF_ROLE_ID)}"
+>
+
+<button
+class="btn-success">
+Save Settings
+</button>
+
+</form>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Server Settings",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # MODERATION
+        # ====================================================
+
+        if path == "/moderation":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            members = sorted(
+                guild.members,
+                key=lambda m:
+                    m.display_name.lower()
+            )
+
+            member_options = "".join(
+                f'<option value="{m.id}">'
+                f'{html.escape(m.display_name)}'
+                f' ({m.id})'
+                f'</option>'
+                for m in members
+                if not m.bot
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Moderation
+</div>
+
+<div class="page-subtitle">
+Manage members without opening Discord.
+</div>
+
+</div>
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+
+<h2>🔨 Ban</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="ban"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Reason for ban..."
+></textarea>
+
+<button class="btn-danger">
+Ban Member
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>👢 Kick</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="kick"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Reason for kick..."
+></textarea>
+
+<button class="btn-danger">
+Kick Member
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>⚠️ Warn</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="warn"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Warning reason..."
+></textarea>
+
+<button>
+Warn Member
+</button>
+
+</form>
+
+</div>
+
+</div>
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Moderation",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # GIVEAWAYS
+        # ====================================================
+
+        if path == "/giveaways":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            channels = "".join(
+                f'<option value="{c.id}">'
+                f'#{html.escape(c.name)}'
+                f'</option>'
+                for c in guild.text_channels
+            )
+
+            giveaway_rows = []
+
+            for message_id, data in db.get(
+                "giveaways",
+                {}
+            ).items():
+
+                if int(
+                    data.get(
+                        "guild_id",
+                        0
+                    )
+                ) != guild.id:
+
+                    continue
+
+                status = (
+                    "Ended"
+                    if data.get("ended")
+                    else "Active"
+                )
+
+                giveaway_rows.append(
+                    f"""
+<tr>
+
+<td>
+{html.escape(
+    str(data.get("prize", "Unknown"))
+)}
+</td>
+
+<td>
+{data.get("winners", 0)}
+</td>
+
+<td>
+{status}
+</td>
+
+<td>
+<code>{message_id}</code>
+</td>
+
+</tr>
+"""
+                )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Giveaways
+</div>
+
+<div class="page-subtitle">
+Create and manage giveaways from Visto Dashboard.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>🎉 Create Giveaway</h2>
+
+<form method="POST"
+action="/giveaway?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Prize
+</label>
+
+<input
+name="prize"
+required
+placeholder="Nitro, Robux, Money, etc."
+>
+
+<label>
+Duration
+</label>
+
+<input
+name="duration"
+required
+placeholder="2h 30m"
+>
+
+<label>
+Winners
+</label>
+
+<input
+type="number"
+name="winners"
+value="1"
+min="1"
+max="100"
+required
+>
+
+<label>
+Giveaway Channel
+</label>
+
+<select name="channel_id">
+{channels}
+</select>
+
+<label>
+Host
+</label>
+
+<input
+name="host"
+placeholder="Giveaway Creator"
+>
+
+<button
+class="btn-success">
+🎉 Start Giveaway
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>📋 Existing Giveaways</h2>
+
+<table>
+
+<thead>
+
+<tr>
+<th>Prize</th>
+<th>Winners</th>
+<th>Status</th>
+<th>Message ID</th>
+</tr>
+
+</thead>
+
+<tbody>
+
+{"".join(giveaway_rows) or
+"<tr><td colspan='4'>No giveaways yet.</td></tr>"}
+
+</tbody>
+
+</table>
+
+<hr>
+
+<form method="POST"
+action="/giveaway/manage?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Message ID
+</label>
+
+<input
+name="message_id"
+required
+placeholder="Giveaway message ID"
+>
+
+<label>
+Action
+</label>
+
+<select name="action">
+
+<option value="end">
+End Giveaway
+</option>
+
+<option value="reroll">
+Reroll Winners
+</option>
+
+<option value="delete">
+Delete Giveaway Data
+</option>
+
+</select>
+
+<button>
+Apply
+</button>
+
+</form>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Giveaways",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # TICKETS
+        # ====================================================
+
+        if path == "/tickets":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            tickets = db.get(
+                "tickets",
+                {}
+            ).get(
+                str(guild.id),
+                {}
+            )
+
+            rows = []
+
+            for channel_id, ticket in tickets.items():
+
+                rows.append(
+                    f"""
+<tr>
+
+<td>
+<code>{channel_id}</code>
+</td>
+
+<td>
+{html.escape(
+    str(ticket.get("type", "support"))
+)}
+</td>
+
+<td>
+{
+    "Closed"
+    if ticket.get("closed")
+    else "Open"
+}
+</td>
+
+<td>
+{ticket.get("owner_id", "Unknown")}
+</td>
+
+</tr>
+"""
+                )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Tickets
+</div>
+
+<div class="page-subtitle">
+Monitor your Buy, Claim and Support tickets.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<table>
+
+<thead>
+
+<tr>
+<th>Channel</th>
+<th>Type</th>
+<th>Status</th>
+<th>Owner</th>
+</tr>
+
+</thead>
+
+<tbody>
+
+{"".join(rows) or
+"<tr><td colspan='4'>No tickets recorded.</td></tr>"}
+
+</tbody>
+
+</table>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Tickets",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # AUTORESPONDERS
+        # ====================================================
+
+        if path == "/autoresponders":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            responders = get_guild_data(
+                "autoresponders",
+                guild.id
+            )
+
+            rows = "".join(
+                f"""
+<tr>
+<td>{html.escape(trigger)}</td>
+<td>{html.escape(response)}</td>
+</tr>
+"""
+                for trigger, response
+                in responders.items()
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Autoresponders
+</div>
+
+<div class="page-subtitle">
+Create automatic responses without commands.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<form method="POST"
+action="/autoresponder?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Trigger
+</label>
+
+<input
+name="trigger"
+required
+placeholder="hello"
+>
+
+<label>
+Response
+</label>
+
+<textarea
+name="response"
+required
+placeholder="Hey! 👋"
+></textarea>
+
+<button class="btn-success">
+Add Autoresponder
+</button>
+
+</form>
+
+<hr>
+
+<table>
+
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Response</th>
+</tr>
+</thead>
+
+<tbody>
+
+{rows or
+"<tr><td colspan='2'>None configured.</td></tr>"}
+
+</tbody>
+
+</table>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Autoresponders",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # STATISTICS
+        # ====================================================
+
+        if path == "/statistics":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            messages = get_guild_data(
+                "messages",
+                guild.id
+            )
+
+            invites = get_guild_data(
+                "invites",
+                guild.id
+            )
+
+            total_messages = sum(
+                int(v)
+                for v in messages.values()
+            )
+
+            total_invites = sum(
+                int(
+                    get_invite_stats(
+                        guild.id,
+                        uid
+                    ).get(
+                        "total",
+                        0
+                    )
+                )
+                for uid in invites
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Statistics
+</div>
+
+<div class="page-subtitle">
+Live statistics for {html.escape(guild.name)}
+</div>
+
+</div>
+
+</div>
+
+<div class="stats-grid">
+
+<div class="stat-card">
+<div class="stat-label">
+Total Messages
+</div>
+
+<div class="stat-value">
+{total_messages:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">
+Active Invites
+</div>
+
+<div class="stat-value">
+{total_invites:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">
+Tracked Members
+</div>
+
+<div class="stat-value">
+{len(messages):,}
+</div>
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>📌 Message Channel</h2>
+
+<p class="muted">
+
+Only the configured General channel should contribute
+to message statistics.
+
+</p>
+
+<p>
+
+<strong>ID:</strong>
+
+<code>
+{GENERAL_CHANNEL_ID}
+</code>
+
+</p>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Statistics",
+                    body,
+                    guild.id
+                )
+            )
+
+        return self._send(
+            404,
+            "Page not found."
+        )
+
+    # --------------------------------------------------------
+    # POST
+    # --------------------------------------------------------
+
+    def do_POST(self):
+
+        if not self._auth_ok():
+
+            return self._send(
+                401,
+                "Unauthorized"
+            )
+
+        length = int(
+            self.headers.get(
+                "Content-Length",
+                "0"
+            )
+        )
+
+        raw = self.rfile.read(
+            length
+        ).decode(
+            "utf-8"
+        )
+
+        data = {
+            key: values[0]
+            for key, values
+            in parse_qs(raw).items()
+            if values
+        }
+
+        path = urlparse(
+            self.path
+        ).path
+
+        try:
+
+            guild = dashboard_guild_from_id(
+                data.get(
+                    "guild_id"
+                )
+            )
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "Invalid guild."
+                )
+
+            # =================================================
+            # SETTINGS
+            # =================================================
+
+            if path == "/settings":
+
+                dashboard_backup_database()
+
+                settings = get_guild_data(
+                    "settings",
+                    guild.id
+                )
+
+                mapping = {
+
+                    "general_channel":
+                        "general_channel",
+
+                    "log_channel":
+                        "log_channel",
+
+                    "buy_category":
+                        "ticket_buy_category",
+
+                    "claim_category":
+                        "ticket_claim_category",
+
+                    "support_category":
+                        "ticket_support_category",
+
+                    "staff_role":
+                        "ticket_staff_role",
+                }
+
+                for form_key, db_key in mapping.items():
+
+                    value = (
+                        data.get(
+                            form_key,
+                            ""
+                        ).strip()
+                    )
+
+                    if not value:
+                        continue
+
+                    settings[db_key] = int(
+                        value
+                    )
+
+                save_database()
+
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Saved",
+                        """
+<div class="card">
+
+<h2>✅ Settings Saved</h2>
+
+<p>
+Your server settings were updated.
+Your existing bot data was not reset.
+</p>
+
+<a class="btn"
+href="?key=__KEY__">
+Back to Dashboard
+</a>
+
+</div>
+""".replace(
+                            "__KEY__",
+                            html.escape(
+                                DASHBOARD_PASSWORD
+                            )
+                        )
+                    )
+                )
+
+            # =================================================
+            # MODERATION
+            # =================================================
+
+            if path == "/moderation":
+
+                action = data.get(
+                    "action"
+                )
+
+                user_id = data.get(
+                    "user_id"
+                )
+
+                reason = (
+                    data.get(
+                        "reason"
+                    )
+                    or
+                    "No reason provided"
+                )
+
+                if action == "ban":
+
+                    success, message = dashboard_run(
+                        dashboard_ban(
+                            guild,
+                            user_id,
+                            reason
+                        )
+                    )
+
+                elif action == "kick":
+
+                    success, message = dashboard_run(
+                        dashboard_kick(
+                            guild,
+                            user_id,
+                            reason
+                        )
+                    )
+
+                elif action == "warn":
+
+                    success, message = dashboard_run(
+                        dashboard_warn(
+                            guild,
+                            user_id,
+                            reason,
+                            guild.owner_id
+                        )
+                    )
+
+                else:
+
+                    return self._send(
+                        400,
+                        "Unknown moderation action."
+                    )
+
+                color = (
+                    "✅"
+                    if success
+                    else
+                    "❌"
+                )
+
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Moderation Result",
+                        f"""
+<div class="card">
+
+<h2>
+{color} Moderation Result
+</h2>
+
+<p>
+{html.escape(message)}
+</p>
+
+<a class="btn"
+href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={guild.id}">
+Back to Moderation
+</a>
+
+</div>
+"""
+                    )
+                )
+
+            # =================================================
+            # GIVEAWAY
+            # =================================================
+
+            if path == "/giveaway":
+
+                channel = guild.get_channel(
+                    int(
+                        data.get(
+                            "channel_id"
+                        )
+                    )
+                )
+
+                if not isinstance(
+                    channel,
+                    discord.TextChannel
+                ):
+
+                    return self._send(
+                        400,
+                        "Invalid giveaway channel."
+                    )
+
+                prize = data.get(
+                    "prize",
+                    ""
+                ).strip()
+
+                duration = data.get(
+                    "duration",
+                    ""
+                ).strip()
+
+                try:
+
+                    winners = int(
+                        data.get(
+                            "winners",
+                            "1"
+                        )
+                    )
+
+                except ValueError:
+
+                    return self._send(
+                        400,
+                        "Invalid winners amount."
+                    )
+
+                host = (
+                    data.get(
+                        "host"
+                    )
+                    or
+                    "Giveaway Creator"
+                )
+
+                success, message = dashboard_run(
+
+                    dashboard_create_giveaway(
+
+                        guild,
+                        channel,
+                        prize,
+                        duration,
+                        winners,
+                        host
+                    )
+                )
+
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Giveaway Result",
+                        f"""
+<div class="card">
+
+<h2>
+{"🎉" if success else "❌"}
+Giveaway Result
+</h2>
+
+<p>
+{html.escape(message)}
+</p>
+
+<a class="btn"
+href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={guild.id}">
+Back to Giveaways
+</a>
+
+</div>
+"""
+                    )
+                )
+
+            # =================================================
+            # GIVEAWAY MANAGEMENT
+            # =================================================
+
+            if path == "/giveaway/manage":
+
+                message_id = str(
+                    data.get(
+                        "message_id"
+                    )
+                )
+
+                action = data.get(
+                    "action"
+                )
+
+                giveaway = db[
+                    "giveaways"
+                ].get(
+                    message_id
+                )
+
+                if not giveaway:
+
+                    return self._send(
+                        404,
+                        "Giveaway not found."
+                    )
+
+                if action == "end":
+
+                    dashboard_run(
+                        finish_giveaway(
+                            message_id
+                        )
+                    )
+
+                elif action == "reroll":
+
+                    entries = list(
+                        dict.fromkeys(
+                            giveaway.get(
+                                "entries",
+                                []
+                            )
+                        )
+                    )
+
+                    if entries:
+
+                        winners = random.sample(
+
+                            entries,
+
+                            min(
+                                int(
+                                    giveaway[
+                                        "winners"
+                                    ]
+                                ),
+                                len(entries)
+                            )
+                        )
+
+                        giveaway[
+                            "winners_selected"
+                        ] = winners
+
+                        save_database()
+
+                elif action == "delete":
+
+                    db[
+                        "giveaways"
+                    ].pop(
+                        message_id,
+                        None
+                    )
+
+                    save_database()
+
+                return self._redirect(
+                    f"/giveaways?key="
+                    f"{DASHBOARD_PASSWORD}"
+                    f"&guild_id={guild.id}"
+                )
+
+            # =================================================
+            # AUTORESPONDER
+            # =================================================
+
+            if path == "/autoresponder":
+
+                dashboard_backup_database()
+
+                trigger = (
+                    data.get(
+                        "trigger",
+                        ""
+                    )
+                    .strip()
+                    .lower()
+                )
+
+                response = (
+                    data.get(
+                        "response",
+                        ""
+                    )
+                    .strip()
+                )
+
+                if not trigger or not response:
+
+                    return self._send(
+                        400,
+                        "Trigger and response are required."
+                    )
+
+                responders = get_guild_data(
+                    "autoresponders",
+                    guild.id
+                )
+
+                responders[
+                    trigger
+                ] = response
+
+                save_database()
+
+                return self._redirect(
+                    f"/autoresponders?key="
+                    f"{DASHBOARD_PASSWORD}"
+                    f"&guild_id={guild.id}"
+                )
+
+            return self._send(
+                404,
+                "Unknown dashboard action."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Dashboard POST error: {error}"
+            )
+
+            return self._send(
+                500,
+                f"Dashboard error: {html.escape(str(error))}"
+            )
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
         return
 
+
+# ============================================================
+# START DASHBOARD
+# ============================================================
 
 def start_dashboard():
+
     global _dashboard_server
+
     if _dashboard_server is not None:
         return
-    try:
-        _dashboard_server = ThreadingHTTPServer((DASHBOARD_HOST, DASHBOARD_PORT), DashboardHandler)
-        threading.Thread(target=_dashboard_server.serve_forever, daemon=True).start()
-        print(f"Dashboard running on port {DASHBOARD_PORT}")
-    except Exception as error:
-        print(f"Dashboard failed to start: {error}")
 
+    try:
+
+        _dashboard_server = ThreadingHTTPServer(
+
+            (
+                DASHBOARD_HOST,
+                DASHBOARD_PORT
+            ),
+
+            DashboardHandler
+        )
+
+        thread = threading.Thread(
+            target=_dashboard_server.serve_forever,
+            daemon=True
+        )
+
+        thread.start()
+
+        print(
+            f"Visto Dashboard running on "
+            f"port {DASHBOARD_PORT}"
+        )
+
+    except Exception as error:
+
+        print(
+            f"Dashboard failed to start: {error}"
+        )
 
 # ============================================================
 # COMMAND ERRORS

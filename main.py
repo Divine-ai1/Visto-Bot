@@ -3,31 +3,16 @@ import json
 import random
 import re
 import asyncio
-from threading import Thread
+import html
+import secrets
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timezone, timedelta
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from flask import Flask
-
-
-app = Flask(__name__)
-
-
-@app.route("/")
-def home():
-    return "VISTO BEAST IS ALIVE"
-
-
-def keep_alive():
-    port = int(os.environ.get("PORT", 8080)) # Render uses PORT env
-    Thread(
-        target=lambda: app.run(
-            host="0.0.0.0",
-            port=port
-        )
-    ).start()
 
 
 # ============================================================
@@ -50,7 +35,7 @@ DB_FILE = "visto_data.json"
 
 if not TOKEN:
     raise RuntimeError(
-        "TOKEN secret was not found. Make sure your Replit Secret is named TOKEN."
+        "TOKEN secret was not found. Make sure your Render Environment Variable is named TOKEN."
     )
 
 
@@ -66,7 +51,8 @@ DEFAULT_DATABASE = {
     "warnings": {},
     "settings": {},
     "giveaways": {},
-    "tickets": {}
+    "tickets": {},
+    "autoresponders": {}
 }
 
 
@@ -92,11 +78,15 @@ def load_database():
 
 
 db = load_database()
+DB_LOCK = threading.RLock()
 
 
 def save_database():
-    with open(DB_FILE, "w") as file:
-        json.dump(db, file, indent=4)
+    with DB_LOCK:
+        temp_file = DB_FILE + ".tmp"
+        with open(temp_file, "w") as file:
+            json.dump(db, file, indent=4)
+        os.replace(temp_file, DB_FILE)
 
 
 def get_guild_data(category, guild_id):
@@ -737,6 +727,14 @@ async def on_ready():
 
     await restore_giveaways()
 
+    # Persistent button views survive bot restarts.
+    bot.add_view(TicketCreateView())
+    bot.add_view(TicketCloseView())
+    bot.add_view(ClosedTicketView())
+    bot.add_view(GiveawayView())
+
+    start_dashboard()
+
     await bot.change_presence(
         status=discord.Status.online,
         activity=discord.Game(
@@ -777,9 +775,18 @@ async def on_message(message):
 
         save_database()
 
-    await bot.process_commands(
-        message
-    )
+    # Autoresponder runs before prefix commands, but never on bot messages.
+    if message.guild:
+        responders = get_guild_data("autoresponders", message.guild.id)
+        content = message.content.strip().lower()
+        response_text = responders.get(content)
+        if response_text:
+            try:
+                await message.channel.send(response_text)
+            except discord.HTTPException:
+                pass
+
+    await bot.process_commands(message)
 
 
 # ============================================================
@@ -789,48 +796,61 @@ async def on_message(message):
 def get_invite_stats(guild_id, inviter_id):
     guild_invites = get_guild_data("invites", guild_id)
     inviter_id = str(inviter_id)
-
     current = guild_invites.get(inviter_id)
 
-    # Migrate the old format:
-    # "inviter_id": 5
-    # into the new Falcon-style structure.
     if isinstance(current, (int, float)):
         current = {
             "joins": int(current),
+            "fake": 0,
             "left": 0,
             "rejoins": 0,
             "total": int(current)
         }
-        guild_invites[inviter_id] = current
 
     if not isinstance(current, dict):
         current = {}
 
     current.setdefault("joins", 0)
+    current.setdefault("fake", 0)
     current.setdefault("left", 0)
     current.setdefault("rejoins", 0)
-    current.setdefault("total", max(0, current["joins"] - current["left"]))
-
-    # Total is active successful invites:
-    # first-time joins minus members who have left.
-    current["total"] = max(
-        0,
-        int(current["joins"]) - int(current["left"])
-    )
-
+    current.setdefault("total", 0)
+    current["total"] = max(0, int(current["joins"]) - int(current["left"]))
     guild_invites[inviter_id] = current
     return current
+
+
+def recompute_inviter_rejoins(guild_id, inviter_id):
+    members = get_guild_data("invite_members", guild_id)
+    count = 0
+    for history in members.values():
+        if str(history.get("inviter_id")) == str(inviter_id) and not history.get("currently_left", False) and history.get("has_left", False):
+            count += 1
+    stats = get_invite_stats(guild_id, inviter_id)
+    stats["rejoins"] = count
+    return stats
 
 
 def get_invite_member_data(guild_id, member_id):
     guild_members = get_guild_data("invite_members", guild_id)
     member_id = str(member_id)
-
     if member_id not in guild_members:
-        guild_members[member_id] = {}
-
-    return guild_members[member_id]
+        guild_members[member_id] = {
+            "inviter_id": None,
+            "join_count": 0,
+            "has_left": False,
+            "currently_left": False,
+            "last_join": None,
+            "last_leave": None
+        }
+    data = guild_members[member_id]
+    data.setdefault("inviter_id", None)
+    data.setdefault("join_count", 0)
+    data.setdefault("has_left", bool(data.get("last_leave")))
+    data.setdefault("currently_left", bool(data.get("last_leave")))
+    data.setdefault("last_join", None)
+    data.setdefault("last_leave", None)
+    return data
 
 
 async def refresh_invite_cache_after_join(guild, new_invites):
@@ -841,17 +861,11 @@ async def refresh_invite_cache_after_join(guild, new_invites):
         }
         for invite in new_invites
     }
-
-    # Refresh vanity cache too, but never credit it.
     try:
         vanity_invite = await guild.vanity_invite()
         vanity_cache[guild.id] = (
-            {
-                "code": vanity_invite.code,
-                "uses": vanity_invite.uses or 0
-            }
-            if vanity_invite
-            else None
+            {"code": vanity_invite.code, "uses": vanity_invite.uses or 0}
+            if vanity_invite else None
         )
     except (discord.Forbidden, discord.HTTPException, AttributeError):
         pass
@@ -860,163 +874,87 @@ async def refresh_invite_cache_after_join(guild, new_invites):
 @bot.event
 async def on_member_join(member):
     guild = member.guild
-    member_id = str(member.id)
-
     try:
         old_invites = invite_cache.get(guild.id, {})
         old_vanity = vanity_cache.get(guild.id)
-
         new_invites = await guild.invites()
-
         used_invite = None
 
         for invite in new_invites:
             old = old_invites.get(invite.code, {})
-            old_uses = old.get("uses", 0)
-            new_uses = invite.uses or 0
-
-            if new_uses > old_uses:
+            if (invite.uses or 0) > old.get("uses", 0):
                 used_invite = invite
                 break
 
-        # Check vanity separately. Vanity joins NEVER get credited.
         vanity_join = False
         try:
             vanity_invite = await guild.vanity_invite()
-
             if vanity_invite:
-                old_vanity_uses = (
-                    old_vanity.get("uses", 0)
-                    if old_vanity
-                    else 0
-                )
-
-                if (vanity_invite.uses or 0) > old_vanity_uses:
-                    vanity_join = True
-
+                old_uses = old_vanity.get("uses", 0) if old_vanity else 0
+                vanity_join = (vanity_invite.uses or 0) > old_uses
         except (discord.Forbidden, discord.HTTPException, AttributeError):
             pass
 
         await refresh_invite_cache_after_join(guild, new_invites)
 
-        # If this member has previously been tracked, this is a rejoin.
-        member_history = get_invite_member_data(
-            guild.id,
-            member.id
-        )
+        history = get_invite_member_data(guild.id, member.id)
+        inviter_id = history.get("inviter_id")
 
-        inviter_id = member_history.get("inviter_id")
+        # A tracked member who is currently marked as left is a REJOIN.
+        # Rejoin is a state (0/1), never a stacking counter.
+        if inviter_id and history.get("currently_left"):
+            stats = get_invite_stats(guild.id, inviter_id)
+            history["currently_left"] = False
+            history["last_join"] = datetime.now(timezone.utc).timestamp()
+            history["join_count"] = int(history.get("join_count", 1)) + 1
+            stats = recompute_inviter_rejoins(guild.id, inviter_id)
+            save_database()
 
-        # A member already known to the invite system is a rejoin candidate.
-        # If the bot received the leave event, use the real leave timestamp.
-        # If the bot was offline during the leave, fall back to the previous
-        # join timestamp so the member cannot silently stack another invite.
-        if inviter_id and int(member_history.get("join_count", 0)) > 0:
-            reference_timestamp = member_history.get("last_leave")
-            fallback_rejoin = False
-
-            if reference_timestamp is None:
-                reference_timestamp = member_history.get("last_join")
-                fallback_rejoin = reference_timestamp is not None
-
-            if reference_timestamp is not None:
-                reference_time = datetime.fromtimestamp(
-                    float(reference_timestamp),
-                    timezone.utc
-                )
-
-                days_since_reference = (
-                    datetime.now(timezone.utc) - reference_time
-                ).total_seconds() / 86400
-
-                if days_since_reference < 7:
-                    stats = get_invite_stats(
-                        guild.id,
-                        inviter_id
-                    )
-
-                    stats["rejoins"] += 1
-
-                    # Rejoining does NOT create another invite.
-                    stats["total"] = max(
-                        0,
-                        stats["joins"] - stats["left"]
-                    )
-
-                    member_history["last_join"] = datetime.now(
-                        timezone.utc
-                    ).timestamp()
-
-                    member_history["join_count"] = (
-                        int(member_history.get("join_count", 1)) + 1
-                    )
-
-                    # Clear the leave marker so another leave can be tracked.
-                    member_history.pop("last_leave", None)
-
-                    save_database()
-
-                    await send_log(
-                        guild,
-                        "🔁 Member Rejoined",
-                        (
-                            f"**Member:** {member.mention}\n"
-                            f"**Original Inviter:** <@{inviter_id}>\n"
-                            f"**Rejoin:** Under 7 Days\n"
-                            f"**No new invite credited.**"
-                        ),
-                        discord.Color.blurple()
-                    )
-
-                    return
-
-        # A normal invite join. Vanity and unknown joins are not credited.
-        if (
-            used_invite
-            and used_invite.inviter
-            and not vanity_join
-        ):
-            inviter_id = str(used_invite.inviter.id)
-            stats = get_invite_stats(
-                guild.id,
-                inviter_id
+            await send_log(
+                guild,
+                "🔁 Member Rejoined",
+                (
+                    f"**Member:** {member.mention}\n"
+                    f"**Inviter:** <@{inviter_id}>\n\n"
+                    f"**Joins:** `{stats['joins']}`\n"
+                    f"**Fake:** `{stats['fake']}`\n"
+                    f"**Left:** `{stats['left']}`\n"
+                    f"**Rejoin:** `1`"
+                ),
+                discord.Color.blurple()
             )
+            return
+
+        # New member / first tracked join. A rejoin is NOT a new join.
+        if used_invite and used_invite.inviter and not vanity_join:
+            inviter_id = str(used_invite.inviter.id)
+            stats = get_invite_stats(guild.id, inviter_id)
+            stats["joins"] += 1
+            stats["total"] = max(0, stats["joins"] - stats["left"])
 
             now = datetime.now(timezone.utc).timestamp()
-            previous_inviter = member_history.get("inviter_id")
-            previous_leave = member_history.get("last_leave")
+            history["inviter_id"] = inviter_id
+            history["join_count"] = int(history.get("join_count", 0)) + 1
+            history["last_join"] = now
+            history["currently_left"] = False
+            history.setdefault("has_left", False)
+            stats = recompute_inviter_rejoins(guild.id, inviter_id)
+            save_database()
 
-            # First-time join, or a rejoin after 7+ days.
-            # Rejoining after 7+ days is treated as a fresh successful
-            # invite and therefore adds one join/total.
-            if not previous_inviter or previous_leave:
-                stats["joins"] += 1
-                stats["total"] = max(
-                    0,
-                    stats["joins"] - stats["left"]
-                )
-
-                member_history["inviter_id"] = inviter_id
-                member_history.setdefault("first_join", now)
-                member_history["last_join"] = now
-                member_history["join_count"] = (
-                    int(member_history.get("join_count", 0)) + 1
-                )
-                member_history.pop("last_leave", None)
-
-                save_database()
-
-                await send_log(
-                    guild,
-                    "📩 Member Invited",
-                    (
-                        f"**Member:** {member.mention}\n"
-                        f"**Inviter:** {used_invite.inviter.mention}\n"
-                        f"**Invite Code:** `{used_invite.code}`\n"
-                        f"**Total Invites:** `{stats['total']}`"
-                    ),
-                    discord.Color.green()
-                )
+            await send_log(
+                guild,
+                "📩 Member Joined Through Invite",
+                (
+                    f"**Member:** {member.mention}\n"
+                    f"**Inviter:** {used_invite.inviter.mention}\n"
+                    f"**Invite:** `{used_invite.code}`\n\n"
+                    f"**Joins:** `{stats['joins']}`\n"
+                    f"**Fake:** `{stats['fake']}`\n"
+                    f"**Left:** `{stats['left']}`\n"
+                    f"**Rejoin:** `0`"
+                ),
+                discord.Color.green()
+            )
 
     except Exception as error:
         print(f"Invite tracking error: {error}")
@@ -1025,50 +963,40 @@ async def on_member_join(member):
 @bot.event
 async def on_member_remove(member):
     guild = member.guild
-    member_id = str(member.id)
-
     try:
-        member_history = get_invite_member_data(
-            guild.id,
-            member.id
-        )
-
-        inviter_id = member_history.get("inviter_id")
-
+        history = get_invite_member_data(guild.id, member.id)
+        inviter_id = history.get("inviter_id")
         if not inviter_id:
             return
 
-        # Count every tracked departure once.
-        # The next join can then become a rejoin.
-        if not member_history.get("last_leave"):
-            stats = get_invite_stats(
-                guild.id,
-                inviter_id
-            )
-
+        # Count LEFT only once for this member. Every later leave/rejoin
+        # cycle toggles Rejoin 0/1 without stacking Left.
+        if not history.get("has_left"):
+            stats = get_invite_stats(guild.id, inviter_id)
             stats["left"] += 1
-            stats["total"] = max(
-                0,
-                stats["joins"] - stats["left"]
-            )
+            stats["total"] = max(0, stats["joins"] - stats["left"])
+            history["has_left"] = True
+        else:
+            stats = get_invite_stats(guild.id, inviter_id)
 
-            member_history["last_leave"] = datetime.now(
-                timezone.utc
-            ).timestamp()
+        history["currently_left"] = True
+        history["last_leave"] = datetime.now(timezone.utc).timestamp()
+        stats = recompute_inviter_rejoins(guild.id, inviter_id)
+        save_database()
 
-            save_database()
-
-            await send_log(
-                guild,
-                "📤 Member Left",
-                (
-                    f"**Member:** <@{member.id}>\n"
-                    f"**Original Inviter:** <@{inviter_id}>\n"
-                    f"**Left:** `{stats['left']}`\n"
-                    f"**Total Invites:** `{stats['total']}`"
-                ),
-                discord.Color.orange()
-            )
+        await send_log(
+            guild,
+            "📤 Member Left",
+            (
+                f"**Member:** <@{member.id}>\n"
+                f"**Inviter:** <@{inviter_id}>\n\n"
+                f"**Joins:** `{stats['joins']}`\n"
+                f"**Fake:** `{stats['fake']}`\n"
+                f"**Left:** `{stats['left']}`\n"
+                f"**Rejoin:** `0`"
+            ),
+            discord.Color.orange()
+        )
 
     except Exception as error:
         print(f"Invite leave tracking error: {error}")
@@ -1126,7 +1054,8 @@ def help_embed():
             "`/leaderboard invites`\n"
             "`/add`\n"
             "`/remove`\n"
-            "`/reset`"
+            "`/reset`\n"
+            "`/stats fake`"
         ),
         inline=True
     )
@@ -1145,7 +1074,8 @@ def help_embed():
         name="🎫 Tickets",
         value=(
             "`/ticket setup`\n"
-            "`/ticket close`"
+            "`/ticket close`\n"
+            "`/user add`"
         ),
         inline=True
     )
@@ -1154,6 +1084,9 @@ def help_embed():
         name="⚙️ Configuration",
         value=(
             "`/setlog`\n"
+            "`/autoresponder_add`\n"
+            "`/autoresponder_remove`\n"
+            "`/autoresponder_list`\n"
             "`/help`"
         ),
         inline=True
@@ -1267,8 +1200,8 @@ def build_invite_embed(user, stats, requested_by=None):
             f"➤ **{user.display_name} has {stats['total']} invites**\n\n"
             f"**Joins:** {stats['joins']}\n"
             f"**Left:** {stats['left']}\n"
-            f"**Fake:** 0\n"
-            f"**Rejoins:** {stats['rejoins']} (7d)"
+            f"**Fake:** {stats.get('fake', 0)}\n"
+            f"**Rejoins:** {stats['rejoins']}"
         ),
         color=VISTO_STATS_COLOR
     )
@@ -1903,6 +1836,24 @@ async def stats_reset(
             f"Reset {type.value} for {user.mention}."
         )
     )
+
+
+@stats_group.command(
+    name="fake",
+    description="Add or remove fake invite count"
+)
+@app_commands.describe(
+    user="Inviter",
+    amount="Amount to add to Fake"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def stats_fake(interaction, user: discord.Member, amount: int):
+    if amount < 1:
+        return await interaction.response.send_message(embed=error_embed("Invalid Amount", "Amount must be at least 1."), ephemeral=True)
+    stats = get_invite_stats(interaction.guild.id, user.id)
+    stats["fake"] += amount
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Fake Invites Updated", f"Added **{amount}** fake invite(s) to {user.mention}."))
 
 
 bot.tree.add_command(
@@ -2883,179 +2834,102 @@ async def unlockdown(
 # TICKET SYSTEM
 # ============================================================
 
-# ============================================================
-# TICKET CATEGORY CONFIG
-# ============================================================
+def ticket_settings(guild):
+    settings = get_guild_data("settings", guild.id)
+    settings.setdefault("ticket_categories", {})
+    settings["ticket_categories"].setdefault("buy", None)
+    settings["ticket_categories"].setdefault("claim", None)
+    settings["ticket_categories"].setdefault("support", None)
+    settings.setdefault("ticket_staff_role", None)
+    return settings
 
-# PUT YOUR CATEGORY IDs HERE
-CLAIM_CATEGORY_ID = 1536695031199567882
-SUPPORT_CATEGORY_ID = 1536721072622149632
-BUY_CATEGORY_ID = 1536720924039184404
+
+def is_ticket_channel(channel):
+    return bool(channel and channel.topic and "Ticket Owner:" in channel.topic)
 
 
-# ============================================================
-# TICKET PANEL VIEW
-# ============================================================
+def ticket_owner_id(channel):
+    if not is_ticket_channel(channel):
+        return None
+    match = re.search(r"Ticket Owner:\s*(\d+)", channel.topic or "")
+    return int(match.group(1)) if match else None
+
+
+def is_ticket_staff(interaction):
+    if interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator:
+        return True
+    settings = ticket_settings(interaction.guild)
+    role_id = settings.get("ticket_staff_role")
+    return bool(role_id and any(role.id == int(role_id) for role in interaction.user.roles))
+
 
 class TicketCreateView(discord.ui.View):
-
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def create_ticket(self, interaction, ticket_type, category_id, emoji):
-
+    async def create_ticket(self, interaction, ticket_type, emoji):
         guild = interaction.guild
-
-        # ----------------------------------------------------
-        # Check if user already has an open ticket
-        # ----------------------------------------------------
+        settings = ticket_settings(guild)
+        category_id = settings["ticket_categories"].get(ticket_type.lower())
 
         existing = discord.utils.find(
-            lambda c: (
-                c.topic
-                and f"Ticket Owner: {interaction.user.id}" in c.topic
-                and c.topic.startswith("Ticket Type:")
-            ),
+            lambda c: is_ticket_channel(c) and ticket_owner_id(c) == interaction.user.id and not c.name.startswith("closed-"),
             guild.text_channels
         )
-
         if existing:
             return await interaction.response.send_message(
-                embed=warning_embed(
-                    "Ticket Already Open",
-                    f"You already have an open ticket: {existing.mention}"
-                ),
+                embed=warning_embed("Ticket Already Open", f"You already have {existing.mention}."),
                 ephemeral=True
             )
 
-        # ----------------------------------------------------
-        # Get category
-        # ----------------------------------------------------
-
-        category = guild.get_channel(category_id)
-
-        if category is None or not isinstance(
-            category,
-            discord.CategoryChannel
-        ):
+        category = guild.get_channel(int(category_id)) if category_id else None
+        if not isinstance(category, discord.CategoryChannel):
             return await interaction.response.send_message(
                 embed=error_embed(
-                    "Category Not Found",
-                    (
-                        f"The **{ticket_type}** ticket category is not configured "
-                        "correctly.\n\n"
-                        "Please contact an administrator."
-                    )
+                    "Ticket Category Not Set",
+                    f"The **{ticket_type}** ticket category is not configured. An admin can set it from the dashboard."
                 ),
                 ephemeral=True
             )
 
-        # ----------------------------------------------------
-        # Permissions
-        # ----------------------------------------------------
-
         overwrites = {
-
-            guild.default_role:
-                discord.PermissionOverwrite(
-                    view_channel=False
-                ),
-
-            interaction.user:
-                discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    attach_files=True,
-                    embed_links=True
-                ),
-
-            guild.me:
-                discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    manage_channels=True,
-                    manage_messages=True
-                )
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True, manage_messages=True)
         }
 
-        # Give moderators/staff access through Manage Channels
-        # or Administrator automatically.
+        settings_role_id = settings.get("ticket_staff_role")
+        if settings_role_id:
+            role = guild.get_role(int(settings_role_id))
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
+        else:
+            for role in guild.roles:
+                if not role.is_default() and (role.permissions.manage_channels or role.permissions.administrator):
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
 
-        for role in guild.roles:
-
-            if role.is_default():
-                continue
-
-            if (
-                role.permissions.manage_channels
-                or role.permissions.administrator
-            ):
-                overwrites[role] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    manage_messages=True
-                )
-
-        # ----------------------------------------------------
-        # Ticket name
-        # ----------------------------------------------------
-
-        safe_name = re.sub(
-            r"[^a-zA-Z0-9-]",
-            "-",
-            interaction.user.name.lower()
-        )
-
-        channel_name = f"{ticket_type.lower()}-{safe_name}"
-
-        # ----------------------------------------------------
-        # Create ticket
-        # ----------------------------------------------------
-
+        safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", interaction.user.name.lower()).strip("-") or "user"
         channel = await guild.create_text_channel(
-            name=channel_name[:100],
+            name=f"{ticket_type.lower()}-{safe_name}"[:100],
             category=category,
-            topic=(
-                f"Ticket Type: {ticket_type} | "
-                f"Ticket Owner: {interaction.user.id}"
-            ),
+            topic=f"Ticket Type: {ticket_type} | Ticket Owner: {interaction.user.id} | Status: Open",
             overwrites=overwrites
         )
-
-        # ----------------------------------------------------
-        # Ticket embed
-        # ----------------------------------------------------
 
         embed = discord.Embed(
             title=f"{emoji} {ticket_type} Ticket",
             description=(
                 f"Welcome {interaction.user.mention}!\n\n"
-                f"Your **{ticket_type.lower()}** ticket has been created.\n\n"
-                "Please explain what you need help with and "
-                "a staff member will assist you shortly."
+                f"Your **{ticket_type.lower()}** ticket has been created.\n"
+                "Please explain what you need and a staff member will assist you.\n\n"
+                "When you're finished, use **Close Ticket** below."
             ),
             color=discord.Color.blurple(),
             timestamp=datetime.now(timezone.utc)
         )
-
-        embed.add_field(
-            name="🎫 Ticket Type",
-            value=f"{emoji} {ticket_type}",
-            inline=True
-        )
-
-        embed.add_field(
-            name="👤 Ticket Owner",
-            value=interaction.user.mention,
-            inline=True
-        )
-
-        embed.set_footer(
-            text="Visto Tickets"
-        )
+        embed.add_field(name="Ticket Owner", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Ticket Type", value=f"{emoji} {ticket_type}", inline=True)
+        embed.set_footer(text="Visto Tickets")
 
         await channel.send(
             content=interaction.user.mention,
@@ -3063,301 +2937,200 @@ class TicketCreateView(discord.ui.View):
             view=TicketCloseView()
         )
 
-        # ----------------------------------------------------
-        # Response
-        # ----------------------------------------------------
-
         await interaction.response.send_message(
-            embed=success_embed(
-                "Ticket Created",
-                (
-                    f"Your **{ticket_type.lower()}** ticket has been created.\n\n"
-                    f"🎫 {channel.mention}"
-                )
-            ),
+            embed=success_embed("Ticket Created", f"Your ticket is {channel.mention}."),
             ephemeral=True
         )
-
-        # ----------------------------------------------------
-        # Logging
-        # ----------------------------------------------------
 
         await send_log(
             guild,
             "🎫 Ticket Created",
-            (
-                f"**User:** {interaction.user.mention}\n"
-                f"**Type:** {emoji} {ticket_type}\n"
-                f"**Channel:** {channel.mention}\n"
-                f"**Category:** {category.name}"
-            ),
+            f"**User:** {interaction.user.mention}\n**Type:** {emoji} {ticket_type}\n**Channel:** {channel.mention}\n**Category:** {category.mention}",
             discord.Color.blurple()
         )
 
-    # ========================================================
-    # CLAIM
-    # ========================================================
+    @discord.ui.button(label="Buy", emoji="🛒", style=discord.ButtonStyle.success, custom_id="visto_ticket_buy")
+    async def buy(self, interaction, button):
+        await self.create_ticket(interaction, "Buy", "🛒")
 
-    @discord.ui.button(
-        label="Claim",
-        emoji="🎟️",
-        style=discord.ButtonStyle.primary,
-        custom_id="visto_ticket_claim"
-    )
-    async def claim_ticket(
-        self,
-        interaction,
-        button
-    ):
+    @discord.ui.button(label="Claim", emoji="🎁", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim")
+    async def claim(self, interaction, button):
+        await self.create_ticket(interaction, "Claim", "🎁")
 
-        await self.create_ticket(
-            interaction,
-            "Claim",
-            CLAIM_CATEGORY_ID,
-            "🎟️"
-        )
-
-    # ========================================================
-    # SUPPORT
-    # ========================================================
-
-    @discord.ui.button(
-        label="Support",
-        emoji="🛠️",
-        style=discord.ButtonStyle.secondary,
-        custom_id="visto_ticket_support"
-    )
-    async def support_ticket(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.create_ticket(
-            interaction,
-            "Support",
-            SUPPORT_CATEGORY_ID,
-            "🛠️"
-        )
-
-    # ========================================================
-    # BUY
-    # ========================================================
-
-    @discord.ui.button(
-        label="Buy",
-        emoji="🛒",
-        style=discord.ButtonStyle.success,
-        custom_id="visto_ticket_buy"
-    )
-    async def buy_ticket(
-        self,
-        interaction,
-        button
-    ):
-
-        await self.create_ticket(
-            interaction,
-            "Buy",
-            BUY_CATEGORY_ID,
-            "🛒"
-        )
+    @discord.ui.button(label="Support", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_support")
+    async def support(self, interaction, button):
+        await self.create_ticket(interaction, "Support", "🛠️")
 
 
-# ============================================================
-# CLOSE TICKET VIEW
-# ============================================================
-
-class TicketCloseView(discord.ui.View):
-
+class TicketConfirmCloseView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=60)
 
-    @discord.ui.button(
-        label="Close Ticket",
-        emoji="🔒",
-        style=discord.ButtonStyle.danger,
-        custom_id="visto_ticket_close"
-    )
-    async def close_ticket(
-        self,
-        interaction,
-        button
-    ):
+    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger, custom_id="visto_ticket_confirm_close")
+    async def confirm(self, interaction, button):
+        if not is_ticket_staff(interaction):
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
 
         channel = interaction.channel
+        owner_id = ticket_owner_id(channel)
+        settings = ticket_settings(interaction.guild)
+        closed_role_id = settings.get("ticket_staff_role")
 
-        if not channel.topic or "Ticket Owner:" not in channel.topic:
+        await interaction.response.defer()
 
-            return await interaction.response.send_message(
-                embed=error_embed(
-                    "Not A Ticket",
-                    "This channel isn't a Visto ticket."
-                ),
-                ephemeral=True
-            )
+        overwrite = channel.overwrites_for(interaction.guild.default_role)
+        overwrite.view_channel = False
+        overwrite.send_messages = False
+        await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
 
-        # Only staff/mods can close
-        if not (
-            interaction.user.guild_permissions.manage_channels
-            or interaction.user.guild_permissions.administrator
-        ):
+        if owner_id:
+            owner = interaction.guild.get_member(owner_id)
+            if owner:
+                owner_overwrite = channel.overwrites_for(owner)
+                owner_overwrite.send_messages = False
+                owner_overwrite.view_channel = True
+                await channel.set_permissions(owner, overwrite=owner_overwrite)
 
-            return await interaction.response.send_message(
-                embed=error_embed(
-                    "No Permission",
-                    "Only moderators can close tickets."
-                ),
-                ephemeral=True
-            )
+        channel.topic = (channel.topic or "") + f" | Status: Closed | Closed By: {interaction.user.id}"
+        new_name = channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}"
+        try:
+            await channel.edit(name=new_name[:100], topic=channel.topic)
+        except discord.HTTPException:
+            pass
 
-        await interaction.response.send_message(
-            embed=warning_embed(
-                "Ticket Closing",
-                "This ticket will be closed in **5 seconds**."
-            )
+        embed = warning_embed(
+            "Ticket Closed",
+            f"This ticket has been closed by {interaction.user.mention}.\n\nUse the button below to delete it permanently."
         )
+        await channel.send(embed=embed, view=ClosedTicketView())
+
+        await interaction.followup.send(embed=success_embed("Ticket Closed", "The ticket has been locked and marked as closed."), ephemeral=True)
 
         await send_log(
             interaction.guild,
-            "🎫 Ticket Closed",
-            (
-                f"**Channel:** {channel.mention}\n"
-                f"**Closed by:** {interaction.user.mention}"
-            ),
+            "🔒 Ticket Closed",
+            f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}",
             discord.Color.orange()
         )
 
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_cancel_close")
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(
+            embed=info_embed("Close Cancelled", "The ticket will remain open."),
+            view=None
+        )
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
+    async def close(self, interaction, button):
+        if not is_ticket_channel(interaction.channel):
+            return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This channel isn't a Visto ticket."), ephemeral=True)
+        if not is_ticket_staff(interaction):
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
+        await interaction.response.send_message(
+            embed=warning_embed("Confirm Ticket Close", "Are you sure you want to close this ticket? This will lock it but will not delete it."),
+            view=TicketConfirmCloseView(),
+            ephemeral=True
+        )
+
+
+class ClosedTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Delete Ticket", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="visto_ticket_delete")
+    async def delete(self, interaction, button):
+        if not is_ticket_staff(interaction):
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can delete tickets."), ephemeral=True)
+        await interaction.response.send_message(embed=warning_embed("Deleting Ticket", "Deleting this ticket in **5 seconds**."))
+        await send_log(interaction.guild, "🗑️ Ticket Deleted", f"**Channel:** {interaction.channel.name}\n**Deleted by:** {interaction.user.mention}", discord.Color.red())
         await asyncio.sleep(5)
-
         try:
-            await channel.delete()
-        except Exception as error:
-            print(f"Ticket deletion error: {error}")
+            await interaction.channel.delete()
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Transcript", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_transcript")
+    async def transcript(self, interaction, button):
+        if not is_ticket_staff(interaction):
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can create transcripts."), ephemeral=True)
+        messages = []
+        async for msg in interaction.channel.history(limit=500, oldest_first=True):
+            messages.append(f"[{msg.created_at:%Y-%m-%d %H:%M:%S}] {msg.author}: {msg.content}")
+        transcript = "\n".join(messages) or "No messages."
+        filename = f"transcript-{interaction.channel.id}.txt"
+        with open(filename, "w", encoding="utf-8") as file:
+            file.write(transcript)
+        await interaction.response.send_message(file=discord.File(filename), ephemeral=True)
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
 
 
-# ============================================================
-# /ticket COMMAND GROUP
-# ============================================================
+class UserAddModal(discord.ui.Modal, title="Add User To Ticket"):
+    user_id = discord.ui.TextInput(label="User ID", placeholder="Enter the Discord user ID", required=True, max_length=30)
 
-ticket_group = app_commands.Group(
-    name="ticket",
-    description="Visto ticket system"
-)
+    async def on_submit(self, interaction):
+        if not is_ticket_staff(interaction):
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can add users."), ephemeral=True)
+        try:
+            user = await interaction.guild.fetch_member(int(self.user_id.value.strip()))
+        except (ValueError, discord.NotFound, discord.HTTPException):
+            return await interaction.response.send_message(embed=error_embed("User Not Found", "Enter a valid member ID from this server."), ephemeral=True)
+        await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+        await interaction.response.send_message(embed=success_embed("User Added", f"{user.mention} can now access this ticket."))
 
 
-# ============================================================
-# /ticket setup
-# ============================================================
+user_group = app_commands.Group(name="user", description="Manage users in the current ticket")
 
-@ticket_group.command(
-    name="setup",
-    description="Create the ticket panel"
-)
-@app_commands.checks.has_permissions(
-    manage_channels=True
-)
-async def ticket_setup(
-    interaction
-):
+@user_group.command(name="add", description="Add a user to the current ticket")
+@app_commands.describe(user="Member to add to this ticket")
+async def user_add(interaction, user: discord.Member):
+    if not is_ticket_channel(interaction.channel):
+        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "Use this command inside a ticket."), ephemeral=True)
+    if not is_ticket_staff(interaction):
+        return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can add users."), ephemeral=True)
+    await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+    await interaction.response.send_message(embed=success_embed("User Added", f"{user.mention} has been added to {interaction.channel.mention}."))
 
+bot.tree.add_command(user_group)
+
+
+ticket_group = app_commands.Group(name="ticket", description="Visto ticket system")
+
+@ticket_group.command(name="setup", description="Create the ticket panel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def ticket_setup(interaction):
     embed = discord.Embed(
         title="🎫 Visto Tickets",
         description=(
-            "Need help? Choose the type of ticket you want to create "
-            "using the buttons below.\n\n"
-
-            "🎟️ **Claim**\n"
-            "Open a ticket regarding a claim.\n\n"
-
-            "🛠️ **Support**\n"
-            "Get help from our support team.\n\n"
-
-            "🛒 **Buy**\n"
-            "Open a ticket regarding a purchase."
+            "Choose the type of ticket you want to open.\n\n"
+            "🛒 **Buy** — Purchase or order help.\n"
+            "🎁 **Claim** — Claim/reward help.\n"
+            "🛠️ **Support** — General support.\n\n"
+            "Each ticket type is created in its configured category."
         ),
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc)
     )
+    embed.set_footer(text="Visto Tickets")
+    await interaction.channel.send(embed=embed, view=TicketCreateView())
+    await interaction.response.send_message(embed=success_embed("Ticket Panel Created", "The ticket panel has been posted."), ephemeral=True)
 
-    embed.set_footer(
-        text="Visto • Ticket System"
-    )
+@ticket_group.command(name="close", description="Close the current ticket")
+async def ticket_close(interaction):
+    if not is_ticket_channel(interaction.channel):
+        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This channel isn't a Visto ticket."), ephemeral=True)
+    if not is_ticket_staff(interaction):
+        return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
+    await interaction.response.send_message(embed=warning_embed("Confirm Ticket Close", "Are you sure you want to close this ticket?"), view=TicketConfirmCloseView(), ephemeral=True)
 
-    await interaction.channel.send(
-        embed=embed,
-        view=TicketCreateView()
-    )
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Ticket Panel Created",
-            "The ticket panel has been posted successfully."
-        ),
-        ephemeral=True
-    )
-
-
-# ============================================================
-# /ticket close
-# ============================================================
-
-@ticket_group.command(
-    name="close",
-    description="Close the current ticket"
-)
-async def ticket_close(
-    interaction
-):
-
-    channel = interaction.channel
-
-    if not channel.topic or "Ticket Owner:" not in channel.topic:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Not A Ticket",
-                "This channel isn't a Visto ticket."
-            ),
-            ephemeral=True
-        )
-
-    if not (
-        interaction.user.guild_permissions.manage_channels
-        or interaction.user.guild_permissions.administrator
-    ):
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "No Permission",
-                "Only moderators can close tickets."
-            ),
-            ephemeral=True
-        )
-
-    await interaction.response.send_message(
-        embed=warning_embed(
-            "Ticket Closing",
-            "This ticket will be deleted in **5 seconds**."
-        )
-    )
-
-    await asyncio.sleep(5)
-
-    try:
-        await channel.delete()
-    except Exception as error:
-        print(f"Ticket deletion error: {error}")
-
-
-# ============================================================
-# REGISTER TICKET GROUP
-# ============================================================
-
-bot.tree.add_command(
-    ticket_group
-)
-
+bot.tree.add_command(ticket_group)
 
 
 # ============================================================
@@ -3389,12 +3162,12 @@ async def giveaway_start(
     winners: int
 ):
 
-    if winners < 1:
+    if winners < 1 or winners > 25:
 
         return await interaction.response.send_message(
             embed=error_embed(
                 "Invalid Winners",
-                "There must be at least 1 winner."
+                "Winners must be between 1 and 25."
             ),
             ephemeral=True
         )
@@ -3680,8 +3453,63 @@ bot.tree.add_command(
 
 
 # ============================================================
+# SAY COMMAND
+# ============================================================
+
+@bot.command(name="say")
+@commands.has_permissions(manage_messages=True)
+async def say(ctx, *, message=None):
+    if not message:
+        return await ctx.send(embed=error_embed("Usage", "Use `.say <message>`."), delete_after=5)
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    await ctx.send(f"Bot: {message}")
+
+
+# ============================================================
+# AUTORESPONDER
+# ============================================================
+
+@bot.tree.command(name="autoresponder_add", description="Add an autoresponder")
+@app_commands.describe(trigger="Message trigger", response="Bot response")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_add(interaction, trigger: str, response: str):
+    trigger = trigger.strip().lower()
+    if not trigger or len(trigger) > 100:
+        return await interaction.response.send_message(embed=error_embed("Invalid Trigger", "Trigger must be 1-100 characters."), ephemeral=True)
+    responders = get_guild_data("autoresponders", interaction.guild.id)
+    responders[trigger] = response
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Autoresponder Added", f"`{trigger}` will now respond automatically."))
+
+@bot.tree.command(name="autoresponder_remove", description="Remove an autoresponder")
+@app_commands.describe(trigger="Trigger to remove")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_remove(interaction, trigger: str):
+    trigger = trigger.strip().lower()
+    responders = get_guild_data("autoresponders", interaction.guild.id)
+    if trigger not in responders:
+        return await interaction.response.send_message(embed=error_embed("Not Found", f"No autoresponder exists for `{trigger}`."), ephemeral=True)
+    del responders[trigger]
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Autoresponder Removed", f"Removed `{trigger}`."))
+
+@bot.tree.command(name="autoresponder_list", description="List autoresponders")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_list(interaction):
+    responders = get_guild_data("autoresponders", interaction.guild.id)
+    if not responders:
+        return await interaction.response.send_message(embed=info_embed("Autoresponders", "No autoresponders are configured."), ephemeral=True)
+    lines = [f"**{i}.** `{trigger}` → {discord.utils.escape_markdown(response)[:150]}" for i, (trigger, response) in enumerate(responders.items(), 1)]
+    await interaction.response.send_message(embed=info_embed("Autoresponders", "\n".join(lines[:25])))
+
+
+# ============================================================
 # ERROR HANDLING
 # ============================================================
+
 
 @bot.event
 async def on_command_error(
@@ -3759,54 +3587,163 @@ async def on_app_command_error(
     print(
         f"Slash command error: {error}"
     )
-  
+
+
 # ============================================================
-# SAY COMMAND
+# SIMPLE BOT DASHBOARD
 # ============================================================
 
-@bot.command(name="say")
-@commands.has_permissions(manage_messages=True)
-async def say(ctx, *, message=None):
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD") or secrets.token_urlsafe(18)
+DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_PORT = int(os.getenv("PORT", "10000"))
+_dashboard_server = None
 
-    if not message:
-        return await ctx.send(
-            "Usage: `.say <message>`",
-            delete_after=5
-        )
 
+def dashboard_page(title, body):
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>{html.escape(title)}</title>
+<style>body{{font-family:Arial,sans-serif;background:#111827;color:#f9fafb;margin:0;padding:24px}} .wrap{{max-width:1100px;margin:auto}} .card{{background:#1f2937;border:1px solid #374151;border-radius:14px;padding:18px;margin:14px 0}} input,select{{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border-radius:8px;border:1px solid #4b5563;background:#111827;color:#fff}} button{{padding:10px 16px;border:0;border-radius:8px;background:#5865f2;color:white;cursor:pointer}} h1,h2{{margin-top:0}} .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}} .muted{{color:#9ca3af}}</style></head>
+<body><div class='wrap'>{body}</div></body></html>"""
+
+
+def dashboard_stats():
+    guild_count = len(bot.guilds)
+    tickets = sum(len(data) for data in db.get("tickets", {}).values() if isinstance(data, dict))
+    giveaways = sum(len(data) for data in db.get("giveaways", {}).values() if isinstance(data, dict))
+    responders = sum(len(data) for data in db.get("autoresponders", {}).values() if isinstance(data, dict))
+    return guild_count, tickets, giveaways, responders
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def _auth_ok(self):
+        query = parse_qs(urlparse(self.path).query)
+        return query.get("key", [None])[0] == DASHBOARD_PASSWORD
+
+    def _send(self, status, body, content_type="text/html; charset=utf-8"):
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/health":
+            return self._send(200, "OK", "text/plain")
+        if not self._auth_ok():
+            return self._send(401, "Unauthorized. Add ?key=YOUR_DASHBOARD_PASSWORD")
+
+        guild_count, tickets, giveaways, responders = dashboard_stats()
+        cards = f"""
+<h1>𖦹 D ! V ! N Σ 𖦹 Dashboard</h1>
+<p class='muted'>Bot configuration dashboard</p>
+<div class='grid'>
+<div class='card'><h2>Servers</h2><b>{guild_count}</b></div>
+<div class='card'><h2>Tickets</h2><b>{tickets}</b></div>
+<div class='card'><h2>Giveaways</h2><b>{giveaways}</b></div>
+<div class='card'><h2>Autoresponders</h2><b>{responders}</b></div>
+</div>
+<div class='card'><h2>Server Settings</h2>
+<form method='POST' action='/settings?key={html.escape(DASHBOARD_PASSWORD)}'>
+<label>Guild ID</label><input name='guild_id' required>
+<label>Log Channel ID</label><input name='log_channel'>
+<label>Buy Category ID</label><input name='buy_category'>
+<label>Claim Category ID</label><input name='claim_category'>
+<label>Support Category ID</label><input name='support_category'>
+<label>Ticket Staff Role ID</label><input name='staff_role'>
+<button>Save Settings</button>
+</form></div>
+<div class='card'><h2>Autoresponder</h2>
+<form method='POST' action='/autoresponder?key={html.escape(DASHBOARD_PASSWORD)}'>
+<label>Guild ID</label><input name='guild_id' required>
+<label>Trigger</label><input name='trigger' required>
+<label>Response</label><input name='response' required>
+<button>Save Autoresponder</button>
+</form></div>
+<div class='card'><h2>Invite Tracking</h2><p class='muted'>The bot tracks one permanent record per invited member. Rejoin is a 0/1 state and does not stack. Device/IP identity is not available through Discord's bot API.</p></div>
+"""
+        self._send(200, dashboard_page("Visto Dashboard", cards))
+
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._send(401, "Unauthorized")
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8")
+        data = {k: v[0] for k, v in parse_qs(raw).items() if v}
+        path = urlparse(self.path).path
+
+        try:
+            guild_id = int(data.get("guild_id", "0"))
+        except ValueError:
+            return self._send(400, "Invalid guild ID")
+
+        if path == "/settings":
+            settings = get_guild_data("settings", guild_id)
+            for key in ("log_channel", "buy_category", "claim_category", "support_category", "staff_role"):
+                value = data.get(key, "").strip()
+                if value:
+                    try:
+                        settings_key = {
+                            "log_channel": "log_channel",
+                            "buy_category": "ticket_buy_category",
+                            "claim_category": "ticket_claim_category",
+                            "support_category": "ticket_support_category",
+                            "staff_role": "ticket_staff_role"
+                        }[key]
+                        settings[settings_key] = int(value)
+                    except ValueError:
+                        return self._send(400, f"Invalid {key}")
+            settings.setdefault("ticket_categories", {})
+            if data.get("buy_category", "").strip(): settings["ticket_categories"]["buy"] = int(data["buy_category"])
+            if data.get("claim_category", "").strip(): settings["ticket_categories"]["claim"] = int(data["claim_category"])
+            if data.get("support_category", "").strip(): settings["ticket_categories"]["support"] = int(data["support_category"])
+            save_database()
+            return self._send(200, dashboard_page("Saved", "<h1>Saved</h1><p>Settings updated.</p><a href='/'>Back</a>"))
+
+        if path == "/autoresponder":
+            trigger = data.get("trigger", "").strip().lower()
+            response = data.get("response", "").strip()
+            if not trigger or not response:
+                return self._send(400, "Trigger and response are required")
+            responders = get_guild_data("autoresponders", guild_id)
+            responders[trigger] = response
+            save_database()
+            return self._send(200, dashboard_page("Saved", "<h1>Saved</h1><p>Autoresponder updated.</p><a href='/'>Back</a>"))
+
+        return self._send(404, "Not found")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_dashboard():
+    global _dashboard_server
+    if _dashboard_server is not None:
+        return
     try:
-        await ctx.message.delete()
-    except:
-        pass
-
-    await ctx.send(f"{message}")
+        _dashboard_server = ThreadingHTTPServer((DASHBOARD_HOST, DASHBOARD_PORT), DashboardHandler)
+        thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
+        thread.start()
+        print(f"Dashboard running on port {DASHBOARD_PORT}")
+        if not os.getenv("DASHBOARD_PASSWORD"):
+            print(f"DASHBOARD_PASSWORD was not set. Temporary dashboard key: {DASHBOARD_PASSWORD}")
+    except Exception as error:
+        print(f"Dashboard failed to start: {error}")
 
 
 # ============================================================
 # START BOT
 # ============================================================
 
-import os
-from flask import Flask
-import threading
-
-TOKEN = os.environ.get("TOKEN") # important: get token from Render env
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "VISTO BEAST IS ALIVE"
-
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
 
 async def main():
-    # start flask in background thread
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    # start discord bot
+    start_dashboard()
     await bot.start(TOKEN)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )

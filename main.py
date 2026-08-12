@@ -33,7 +33,7 @@ GENERAL_CHANNEL_ID = 1536711358433861683
 GUILD_ID = 0
 
 # DASHBOARD: edit the password HERE, not in an environment variable.
-DASHBOARD_PASSWORD = "ChangeThisDashboardPassword"
+DASHBOARD_PASSWORD = "VistoBot67"
 DASHBOARD_HOST = "0.0.0.0"
 # Render exposes the web service port. The app still needs Render's PORT.
 DASHBOARD_PORT = int(os.getenv("PORT", "10000"))

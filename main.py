@@ -987,7 +987,7 @@ async def say(ctx, *, message=None):
         await ctx.message.delete()
     except discord.HTTPException:
         pass
-    await ctx.send(f"Bot: {message}")
+    await ctx.send(f"{message}")
 
 
 # ============================================================

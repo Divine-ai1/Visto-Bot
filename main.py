@@ -33,7 +33,7 @@ GENERAL_CHANNEL_ID = 1536711358433861683
 GUILD_ID = 0
 
 # DASHBOARD: edit the password HERE, not in an environment variable.
-DASHBOARD_PASSWORD = "VistoBot67"
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
 DASHBOARD_HOST = "0.0.0.0"
 # Render exposes the web service port. The app still needs Render's PORT.
 DASHBOARD_PORT = int(os.getenv("PORT", "10000"))
@@ -774,11 +774,25 @@ async def invites_command(interaction, user: discord.Member = None):
     user = user or interaction.user
     await interaction.response.send_message(embed=build_invite_embed(user, get_invite_stats(interaction.guild.id, user.id)))
 
-
 @bot.command(name="i")
 async def invites_prefix(ctx, member: discord.Member = None):
+
+    print(
+        f"[DEBUG] -i executed | PID={os.getpid()} | "
+        f"guild={ctx.guild.id} | user={ctx.author.id}"
+    )
+
     member = member or ctx.author
-    await ctx.send(embed=build_invite_embed(member, get_invite_stats(ctx.guild.id, member.id)))
+
+    await ctx.send(
+        embed=build_invite_embed(
+            member,
+            get_invite_stats(
+                ctx.guild.id,
+                member.id
+            )
+        )
+    )
     # ============================================================
 # INVITED COMMANDS
 # ============================================================

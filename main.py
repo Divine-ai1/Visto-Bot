@@ -224,7 +224,7 @@ async def send_log(guild, title, description, color=discord.Color.blurple()):
         color=color,
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_footer(text="𖦹 D ! V ! N Σ 𖦹 Logging")
+    embed.set_footer(text="Visto Logging")
     try:
         await channel.send(embed=embed)
     except discord.HTTPException:
@@ -260,7 +260,7 @@ async def ask_reason(interaction, title, prompt):
 
 def help_embed():
     embed = discord.Embed(
-        title="🤖 𖦹 D ! V ! N Σ 𖦹",
+        title="🤖 Visto",
         description=f"All-in-one Discord bot\nPrefix: `{PREFIX}`",
         color=discord.Color.blurple(),
     )
@@ -340,7 +340,7 @@ def build_messages_embed(user, count, today_count, channel):
         color=VISTO_COLOR,
     )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="𖦹 D ! V ! N Σ 𖦹 Message Statistics")
+    embed.set_footer(text="Visto Message Statistics")
     return embed
 
 
@@ -391,7 +391,7 @@ class MessageLeaderboardView(discord.ui.View):
             ),
             color=VISTO_COLOR,
         )
-        embed.set_footer(text=f"Page {self.page + 1}/{pages} • 𖦹 D ! V ! N Σ 𖦹")
+        embed.set_footer(text=f"Page {self.page + 1}/{pages} • Visto")
         return embed
 
     async def update(self, interaction):
@@ -1206,7 +1206,7 @@ class ClosedTicketView(discord.ui.View):
 @app_commands.checks.has_permissions(manage_channels=True)
 async def ticket_setup(interaction):
     embed = discord.Embed(
-        title="🎫 𖦹 D ! V ! N Σ 𖦹 Tickets",
+        title="🎫 Visto Tickets",
         description=(
             "Choose what you need below.\n\n"
             "🛒 **Buy** — purchase help\n"
@@ -1284,7 +1284,7 @@ def create_giveaway_embed(data):
         embed.set_image(url=data["image"])
     if data.get("thumbnail"):
         embed.set_thumbnail(url=data["thumbnail"])
-    embed.set_footer(text="𖦹 D ! V ! N Σ 𖦹 Giveaways")
+    embed.set_footer(text="Visto Giveaways")
     return embed
 
 
@@ -1630,7 +1630,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 f"<p>General: <code>{settings.get('general_channel', GENERAL_CHANNEL_ID)}</code></p>"
                 f"<p>Log: <code>{settings.get('log_channel', 'Not set')}</code></p></div>"
             )
-        body = f"<h1>𖦹 D ! V ! N Σ 𖦹 Dashboard</h1><p class='muted'>Use /setgeneral, /setlog and /set_ticket_categories from Discord. Password is configured in main.py.</p>{''.join(rows) or '<div class=card>No guilds connected.</div>'}"
+        body = f"<h1>Visto Dashboard</h1><p class='muted'>Use /setgeneral, /setlog and /set_ticket_categories from Discord. Password is configured in main.py.</p>{''.join(rows) or '<div class=card>No guilds connected.</div>'}"
         return self._send(200, dashboard_page("Visto Dashboard", body))
 
     def log_message(self, format, *args):
@@ -1682,7 +1682,7 @@ async def on_app_command_error(interaction, error):
 @bot.event
 async def on_ready():
     print("=" * 60)
-    print(f"𖦹 D ! V ! N Σ 𖦹 connected as {bot.user}")
+    print(f"Visto connected as {bot.user}")
     print(f"Guilds: {len(bot.guilds)}")
     print("=" * 60)
     try:

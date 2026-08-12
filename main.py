@@ -1678,15 +1678,229 @@ stats_group = app_commands.Group(
     description="Manage message and invite statistics"
 )
 
-# ...paste the rest of the code here...
 
+# ============================================================
+# /stats messages
+# ============================================================
 
-bot.tree.add_command(stats_group)
+@stats_group.command(
+    name="messages",
+    description="Add, remove, or reset message statistics"
+)
+@app_commands.describe(
+    action="Choose add, remove, or reset",
+    user="User whose statistics will be changed",
+    amount="Amount to add/remove. Not needed for reset."
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def stats_messages(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    user: discord.Member,
+    amount: int = None
+):
+
+    guild_id = interaction.guild.id
+    user_id = str(user.id)
+
+    messages = get_guild_data(
+        "messages",
+        guild_id
+    )
+
+    if action.value == "reset":
+
+        messages[user_id] = 0
+
+        daily = get_guild_data(
+            "message_daily",
+            guild_id
+        )
+
+        for date_data in daily.values():
+            date_data.pop(
+                user_id,
+                None
+            )
+
+        save_database()
+
+        return await interaction.response.send_message(
+            embed=success_embed(
+                "Messages Reset",
+                f"Reset message statistics for {user.mention}."
+            )
+        )
+
+    if amount is None:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Amount Required",
+                "You need to provide an amount for **Add** or **Remove**."
+            ),
+            ephemeral=True
+        )
+
+    if amount < 1:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Amount must be at least `1`."
+            ),
+            ephemeral=True
+        )
+
+    current = int(
+        messages.get(
+            user_id,
+            0
+        )
+    )
+
+    if action.value == "add":
+        messages[user_id] = current + amount
+
+    elif action.value == "remove":
+        messages[user_id] = max(
+            0,
+            current - amount
+        )
+
+    save_database()
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Message Statistics Updated",
+            (
+                f"**User:** {user.mention}\n"
+                f"**Action:** {action.name}\n"
+                f"**Amount:** `{amount:,}`\n"
+                f"**New Total:** `{messages[user_id]:,}`"
+            )
+        )
+    )
 
 
 # ============================================================
-# NEXT SECTION
+# /stats invites
 # ============================================================
+
+@stats_group.command(
+    name="invites",
+    description="Add, remove, or reset invite statistics"
+)
+@app_commands.describe(
+    action="Choose add, remove, or reset",
+    user="User whose statistics will be changed",
+    amount="Amount to add/remove. Not needed for reset."
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def stats_invites(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    user: discord.Member,
+    amount: int = None
+):
+
+    guild_id = interaction.guild.id
+
+    stats = get_invite_stats(
+        guild_id,
+        user.id
+    )
+
+    if action.value == "reset":
+
+        stats["joins"] = 0
+        stats["fake"] = 0
+        stats["left"] = 0
+        stats["rejoins"] = 0
+        stats["total"] = 0
+
+        save_database()
+
+        return await interaction.response.send_message(
+            embed=success_embed(
+                "Invites Reset",
+                f"Reset invite statistics for {user.mention}."
+            )
+        )
+
+    if amount is None:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Amount Required",
+                "You need to provide an amount for **Add** or **Remove**."
+            ),
+            ephemeral=True
+        )
+
+    if amount < 1:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Amount must be at least `1`."
+            ),
+            ephemeral=True
+        )
+
+    if action.value == "add":
+
+        stats["joins"] += amount
+
+    elif action.value == "remove":
+
+        stats["joins"] = max(
+            0,
+            stats["joins"] - amount
+        )
+
+    stats["total"] = max(
+        0,
+        stats["joins"] - stats["left"]
+    )
+
+    save_database()
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Invite Statistics Updated",
+            (
+                f"**User:** {user.mention}\n"
+                f"**Action:** {action.name}\n"
+                f"**Amount:** `{amount:,}`\n"
+                f"**Joins:** `{stats['joins']:,}`\n"
+                f"**Active Invites:** `{stats['total']:,}`"
+            )
+        )
+    )
+
+
+# ============================================================
+# REGISTER /stats
+# ============================================================
+
+bot.tree.add_command(
+    stats_group
+)
 
 
 # ============================================================

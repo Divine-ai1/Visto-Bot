@@ -139,23 +139,26 @@ bot = commands.Bot(
 
 VISTO_COLOR = discord.Color.red()
 
-# Premium server emojis. These are looked up by NAME so you do not need to
-# hard-code emoji IDs. Make sure the bot can see the custom emojis in the
-# server. Unicode fallbacks keep the bot working if an emoji is unavailable.
-PREMIUM_EMOJI_NAMES = {
-    "ticket": "ticket",
-    "mod": "mod",
-    "giveaway": "giveaway",
-    "arrow": "arrow",
+# Exact premium server emojis supplied by the bot owner.
+# These are static custom Discord emojis (not animated).
+PREMIUM_EMOJI_IDS = {
+    "ticket": 1537091039515385866,
+    "mod": 1537091003306213416,
+    "arrow": 1537091085069844551,
+    "giveaway": 1537091136244678716,
 }
 
 
 def premium_emoji(guild, name, fallback=""):
-    emoji_name = PREMIUM_EMOJI_NAMES.get(name, name)
-    if guild is not None:
-        for emoji in getattr(guild, "emojis", []):
-            if emoji.name == emoji_name and emoji.available:
-                return str(emoji)
+    """Return the exact premium custom emoji by its Discord ID."""
+    emoji_id = PREMIUM_EMOJI_IDS.get(name)
+    if emoji_id:
+        # PartialEmoji renders as the exact <:name:id> custom emoji.
+        return str(discord.PartialEmoji(
+            name=name,
+            id=emoji_id,
+            animated=False,
+        ))
     return fallback
 
 
@@ -1628,7 +1631,7 @@ class GiveawayView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild = guild
         self.enter_button.emoji = premium_emoji(guild, "giveaway", "🎉")
-        self.participants.emoji = premium_emoji(guild, "ticket", "👥")
+        self.participants.emoji = premium_emoji(guild, "giveaway", "🎉")
         self.enter_button.disabled = disabled
 
     @discord.ui.button(label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
@@ -1670,7 +1673,7 @@ class GiveawayView(discord.ui.View):
         # The old code saved the entry but never edited the public giveaway
         # message, so its displayed count stayed at 0. Refresh it immediately.
         self.enter_button.emoji = premium_emoji(interaction.guild, "giveaway", "🎉")
-        self.participants.emoji = premium_emoji(interaction.guild, "ticket", "👥")
+        self.participants.emoji = premium_emoji(interaction.guild, "giveaway", "🎉")
         try:
             await interaction.message.edit(embed=create_giveaway_embed(data, interaction.guild), view=self)
         except (discord.NotFound, discord.HTTPException):

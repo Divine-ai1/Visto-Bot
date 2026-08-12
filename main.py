@@ -139,6 +139,25 @@ bot = commands.Bot(
 
 VISTO_COLOR = discord.Color.red()
 
+# Premium server emojis. These are looked up by NAME so you do not need to
+# hard-code emoji IDs. Make sure the bot can see the custom emojis in the
+# server. Unicode fallbacks keep the bot working if an emoji is unavailable.
+PREMIUM_EMOJI_NAMES = {
+    "ticket": "ticket",
+    "mod": "mod",
+    "giveaway": "giveaway",
+    "arrow": "arrow",
+}
+
+
+def premium_emoji(guild, name, fallback=""):
+    emoji_name = PREMIUM_EMOJI_NAMES.get(name, name)
+    if guild is not None:
+        for emoji in getattr(guild, "emojis", []):
+            if emoji.name == emoji_name and emoji.available:
+                return str(emoji)
+    return fallback
+
 
 def success_embed(title, description):
     return discord.Embed(
@@ -258,14 +277,17 @@ async def ask_reason(interaction, title, prompt):
 # HELP
 # ============================================================
 
-def help_embed():
+def help_embed(guild=None):
+    mod_emoji = premium_emoji(guild, "mod", "🛡️")
+    ticket_emoji = premium_emoji(guild, "ticket", "🎫")
+    giveaway_emoji = premium_emoji(guild, "giveaway", "🎉")
     embed = discord.Embed(
-        title="🤖 Visto",
+        title=f"{mod_emoji} Visto",
         description=f"All-in-one Discord bot\nPrefix: `{PREFIX}`",
         color=discord.Color.blurple(),
     )
     embed.add_field(
-        name="🛡️ Moderation",
+        name=f"{mod_emoji} Moderation",
         value="`/ban` ` /unban` `/kick` `/timeout` `/warn` `/warnings` `/delwarn` `/purge` `/lock` `/unlock` `/lockdown` `/unlockdown`",
         inline=False,
     )
@@ -275,12 +297,12 @@ def help_embed():
         inline=False,
     )
     embed.add_field(
-        name="🎫 Tickets",
+        name=f"{ticket_emoji} Tickets",
         value="`/ticket setup` `/ticket close` `/user add`",
         inline=False,
     )
     embed.add_field(
-        name="🎉 Giveaways",
+        name=f"{giveaway_emoji} Giveaways",
         value="`/giveaway start` `/giveaway end` `/giveaway reroll` `/giveaway pause` `/giveaway resume` `/giveaway delete`",
         inline=False,
     )
@@ -294,12 +316,12 @@ def help_embed():
 
 @bot.tree.command(name="help", description="Show bot commands")
 async def slash_help(interaction):
-    await interaction.response.send_message(embed=help_embed())
+    await interaction.response.send_message(embed=help_embed(interaction.guild))
 
 
 @bot.command(name="help")
 async def prefix_help(ctx):
-    await ctx.send(embed=help_embed())
+    await ctx.send(embed=help_embed(ctx.guild))
 
 
 # ============================================================
@@ -350,6 +372,8 @@ class MessageLeaderboardView(discord.ui.View):
         self.guild = ctx.guild
         self.page = 0
         self.per_page = 10
+        self.previous.emoji = premium_emoji(self.guild, "arrow", "◀")
+        self.next.emoji = premium_emoji(self.guild, "arrow", "▶")
         self.refresh_buttons()
 
     def rows(self):
@@ -1211,10 +1235,14 @@ def ticket_type(channel):
 
 
 class TicketPanelView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild=None):
         super().__init__(timeout=None)
+        self.guild = guild
+        self.buy.emoji = premium_emoji(guild, "ticket", "🛒")
+        self.claim.emoji = premium_emoji(guild, "ticket", "🎁")
+        self.support.emoji = premium_emoji(guild, "ticket", "🛠️")
 
-    async def create_ticket(self, interaction, kind, emoji):
+    async def create_ticket(self, interaction, kind, emoji_name):
         guild = interaction.guild
         settings = ticket_settings(guild)
         category_id = settings[kind]
@@ -1246,39 +1274,96 @@ class TicketPanelView(discord.ui.View):
             "owner_id": interaction.user.id,
             "type": kind,
             "closed": False,
+            "claimed_by": None,
             "created": int(datetime.now(timezone.utc).timestamp()),
         }
         save_database()
 
+        emoji = premium_emoji(guild, emoji_name, "🎫")
         embed = discord.Embed(
             title=f"{emoji} {kind.title()} Ticket",
             description=(
                 f"Welcome {interaction.user.mention}!\n\n"
                 "A staff member will assist you.\n\n"
+                "A staff member can **Claim Ticket** so you know who is assisting you.\n\n"
                 "Use **Close Ticket** when you are finished."
             ),
             color=discord.Color.blurple(),
         )
-        await channel.send(embed=embed, view=TicketControlsView())
+        await channel.send(embed=embed, view=TicketControlsView(guild))
         await interaction.response.send_message(embed=success_embed("Ticket Created", f"Your ticket is {channel.mention}."), ephemeral=True)
-        await send_log(guild, "🎫 Ticket Created", f"**Type:** {kind}\n**User:** {interaction.user.mention}\n**Channel:** {channel.mention}")
+        await send_log(guild, f"{premium_emoji(guild, 'ticket', '🎫')} Ticket Created", f"**Type:** {kind}\n**User:** {interaction.user.mention}\n**Channel:** {channel.mention}")
 
     @discord.ui.button(label="Buy", emoji="🛒", style=discord.ButtonStyle.success, custom_id="visto_ticket_buy")
     async def buy(self, interaction, button):
-        await self.create_ticket(interaction, "buy", "🛒")
+        await self.create_ticket(interaction, "buy", "ticket")
 
     @discord.ui.button(label="Claim", emoji="🎁", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim")
     async def claim(self, interaction, button):
-        await self.create_ticket(interaction, "claim", "🎁")
+        await self.create_ticket(interaction, "claim", "ticket")
 
     @discord.ui.button(label="Support", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_support")
     async def support(self, interaction, button):
-        await self.create_ticket(interaction, "support", "🛠️")
+        await self.create_ticket(interaction, "support", "ticket")
 
 
 class TicketControlsView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild=None):
         super().__init__(timeout=None)
+        self.guild = guild
+        self.claim_ticket.emoji = premium_emoji(guild, "ticket", "👤")
+        self.close.emoji = premium_emoji(guild, "ticket", "🔒")
+
+    @discord.ui.button(label="Claim Ticket", emoji="👤", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
+    async def claim_ticket(self, interaction, button):
+        channel = interaction.channel
+        if not is_ticket_channel(channel):
+            return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This is not a Visto ticket."), ephemeral=True)
+
+        settings = ticket_settings(interaction.guild)
+        staff_role = interaction.guild.get_role(settings["staff_role"]) if settings["staff_role"] else None
+        allowed = (
+            interaction.user.guild_permissions.manage_channels
+            or interaction.user.guild_permissions.administrator
+            or (staff_role and staff_role in interaction.user.roles)
+        )
+        if not allowed:
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can claim tickets."), ephemeral=True)
+
+        ticket_data = db["tickets"].setdefault(str(interaction.guild.id), {}).setdefault(str(channel.id), {})
+        claimed_by = ticket_data.get("claimed_by")
+
+        if claimed_by:
+            if int(claimed_by) != interaction.user.id:
+                return await interaction.response.send_message(
+                    embed=warning_embed("Ticket Already Claimed", f"This ticket is currently being handled by <@{claimed_by}>."),
+                    ephemeral=True,
+                )
+            ticket_data["claimed_by"] = None
+            save_database()
+            self.claim_ticket.emoji = premium_emoji(interaction.guild, "ticket", "👤")
+            button.label = "Claim Ticket"
+            embed = discord.Embed(
+                title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Unclaimed",
+                description=f"{interaction.user.mention} has **unclaimed** this ticket. Another staff member can now claim it.",
+                color=discord.Color.orange(),
+            )
+            await interaction.response.edit_message(view=self)
+            await channel.send(embed=embed)
+            return
+
+        ticket_data["claimed_by"] = interaction.user.id
+        save_database()
+        self.claim_ticket.emoji = premium_emoji(interaction.guild, "ticket", "👤")
+        button.label = "Claimed"
+        embed = discord.Embed(
+            title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed",
+            description=f"This ticket is being handled by **{interaction.user.mention}**.\n\nOnly the claiming staff member should take ownership of the conversation unless they unclaim it.",
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(view=self)
+        await channel.send(embed=embed)
+        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed", f"**Channel:** {channel.mention}\n**Claimed by:** {interaction.user.mention}", discord.Color.green())
 
     @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
     async def close(self, interaction, button):
@@ -1306,7 +1391,6 @@ class TicketCloseConfirmView(discord.ui.View):
         if owner:
             await safe_dm(owner, discord.Embed(title="🔒 Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
 
-        # Lock ticket rather than instantly deleting it.
         if owner:
             await channel.set_permissions(owner, view_channel=False, send_messages=False)
         settings = ticket_settings(interaction.guild)
@@ -1355,17 +1439,18 @@ class ClosedTicketView(discord.ui.View):
 @bot.tree.command(name="ticket_setup", description="Post the ticket panel")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def ticket_setup(interaction):
+    ticket_emoji = premium_emoji(interaction.guild, "ticket", "🎫")
     embed = discord.Embed(
-        title="🎫 Visto Tickets",
+        title=f"{ticket_emoji} Visto Tickets",
         description=(
             "Choose what you need below.\n\n"
-            "🛒 **Buy** — purchase help\n"
-            "🎁 **Claim** — claim help\n"
-            "🛠️ **Support** — general support"
+            f"{ticket_emoji} **Buy** — purchase help\n"
+            f"{ticket_emoji} **Claim** — claim help\n"
+            f"{ticket_emoji} **Support** — general support"
         ),
         color=discord.Color.blurple(),
     )
-    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.channel.send(embed=embed, view=TicketPanelView(interaction.guild))
     await interaction.response.send_message(embed=success_embed("Ticket Panel", "Panel posted."), ephemeral=True)
 
 
@@ -1412,22 +1497,32 @@ bot.tree.add_command(user_group)
 giveaway_tasks = {}
 
 
-def create_giveaway_embed(data):
+def giveaway_entry_counts(data):
+    counts = {}
+    for uid in data.get("entries", []):
+        key = str(uid)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def create_giveaway_embed(data, guild=None):
     end_time = int(data["end_time"])
+    giveaway_emoji = premium_emoji(guild, "giveaway", "🎉")
     embed = discord.Embed(
-        title=data.get("title") or "🎉 GIVEAWAY 🎉",
-        description=data.get("description") or "Click **🎉 Enter Giveaway** to participate!",
+        title=data.get("title") or f"{giveaway_emoji} GIVEAWAY {giveaway_emoji}",
+        description=data.get("description") or f"Click **{giveaway_emoji} Enter Giveaway** to participate!",
         color=int(data.get("color", 15844367)),
     )
     embed.add_field(name="🎁 Prize", value=data["prize"], inline=False)
     embed.add_field(name="🏆 Winners", value=str(data["winners"]), inline=True)
-    embed.add_field(name="👤 Host", value=data.get("host_text") or f"<@{data['host_id']}>" , inline=True)
+    embed.add_field(name="👤 Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
     embed.add_field(name="👥 Entries", value=str(len(data.get("entries", []))), inline=True)
+    embed.add_field(name="👤 Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
     embed.add_field(name="⏰ Ends", value=f"<t:{end_time}:R>", inline=True)
     if data.get("required_role_id"):
-        embed.add_field(name="🎭 Required Role", value=f"<@&{data['required_role_id']}>" , inline=True)
+        embed.add_field(name="🎭 Required Role", value=f"<@&{data['required_role_id']}>", inline=True)
     if data.get("blacklisted_role_id"):
-        embed.add_field(name="🚫 Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>" , inline=True)
+        embed.add_field(name="🚫 Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>", inline=True)
     if data.get("extra_role_id") and int(data.get("extra_entries", 0)) > 0:
         embed.add_field(name="✨ Extra Entries", value=f"<@&{data['extra_role_id']}> = {data['extra_entries']} total entries", inline=False)
     if data.get("image"):
@@ -1438,9 +1533,78 @@ def create_giveaway_embed(data):
     return embed
 
 
+class GiveawayParticipantsView(discord.ui.View):
+    def __init__(self, message_id, guild, page=0):
+        super().__init__(timeout=120)
+        self.message_id = str(message_id)
+        self.guild = guild
+        self.page = page
+        self.per_page = 10
+        self.previous.emoji = premium_emoji(guild, "arrow", "◀")
+        self.next.emoji = premium_emoji(guild, "arrow", "▶")
+        self.refresh_buttons()
+
+    def rows(self):
+        data = db["giveaways"].get(self.message_id, {})
+        counts = giveaway_entry_counts(data)
+        rows = []
+        for uid, amount in counts.items():
+            member = self.guild.get_member(int(uid))
+            rows.append((uid, amount, member.display_name if member else f"User {uid}"))
+        rows.sort(key=lambda row: (-row[1], row[2].lower()))
+        return rows
+
+    def pages(self):
+        return max(1, (len(self.rows()) + self.per_page - 1) // self.per_page)
+
+    def refresh_buttons(self):
+        pages = self.pages()
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= pages - 1
+
+    def make_embed(self):
+        data = db["giveaways"].get(self.message_id)
+        if not data:
+            return error_embed("Giveaway Not Found", "This giveaway no longer exists.")
+        rows = self.rows()
+        pages = self.pages()
+        chunk = rows[self.page * self.per_page:(self.page + 1) * self.per_page]
+        lines = []
+        for index, (uid, amount, _) in enumerate(chunk, start=self.page * self.per_page + 1):
+            lines.append(f"**#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
+        if not lines:
+            lines = ["No participants yet."]
+        embed = discord.Embed(
+            title=f"{premium_emoji(self.guild, 'giveaway', '🎉')} Giveaway Participants",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Total Participants", value=str(len(rows)), inline=True)
+        embed.add_field(name="Total Entries", value=str(len(data.get("entries", []))), inline=True)
+        embed.set_footer(text=f"Page {self.page + 1}/{pages}")
+        return embed
+
+    async def update(self, interaction):
+        self.refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Previous", emoji="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.page = max(0, self.page - 1)
+        await self.update(interaction)
+
+    @discord.ui.button(label="Next", emoji="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        self.page = min(self.pages() - 1, self.page + 1)
+        await self.update(interaction)
+
+
 class GiveawayView(discord.ui.View):
-    def __init__(self, disabled=False):
+    def __init__(self, disabled=False, guild=None):
         super().__init__(timeout=None)
+        self.guild = guild
+        self.enter_button.emoji = premium_emoji(guild, "giveaway", "🎉")
+        self.participants.emoji = premium_emoji(guild, "ticket", "👥")
         self.enter_button.disabled = disabled
 
     @discord.ui.button(label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
@@ -1478,7 +1642,38 @@ class GiveawayView(discord.ui.View):
         for _ in range(weight):
             entries.append(interaction.user.id)
         save_database()
-        await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or "You entered the giveaway! 🎉"), ephemeral=True)
+
+        # The old code saved the entry but never edited the public giveaway
+        # message, so its displayed count stayed at 0. Refresh it immediately.
+        self.enter_button.emoji = premium_emoji(interaction.guild, "giveaway", "🎉")
+        self.participants.emoji = premium_emoji(interaction.guild, "ticket", "👥")
+        try:
+            await interaction.message.edit(embed=create_giveaway_embed(data, interaction.guild), view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or f"You entered the giveaway! {premium_emoji(interaction.guild, 'giveaway', '🎉')}"), ephemeral=True)
+
+    @discord.ui.button(label="Participants", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
+    async def participants(self, interaction, button):
+        data = db["giveaways"].get(str(interaction.message.id))
+        if not data:
+            return await interaction.response.send_message(embed=error_embed("Giveaway Not Found", "This giveaway no longer exists."), ephemeral=True)
+        view = GiveawayParticipantsView(interaction.message.id, interaction.guild)
+        await interaction.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
+
+
+def choose_weighted_winners(entries, winner_count):
+    """Pick unique winners while respecting duplicate/weighted entries."""
+    pool = list(entries)
+    winners = []
+    winner_count = min(max(0, int(winner_count)), len(set(pool)))
+    while pool and len(winners) < winner_count:
+        selected = random.choice(pool)
+        winners.append(selected)
+        # Remove all tickets belonging to the selected participant so one
+        # person cannot win multiple slots in the same giveaway.
+        pool = [uid for uid in pool if uid != selected]
+    return winners
 
 
 async def finish_giveaway(message_id, automatic=False):
@@ -1489,7 +1684,7 @@ async def finish_giveaway(message_id, automatic=False):
     data["ended"] = True
     entries = list(data.get("entries", []))
     unique = list(dict.fromkeys(entries))
-    winners = random.sample(unique, min(int(data["winners"]), len(unique))) if unique else []
+    winners = choose_weighted_winners(entries, data["winners"]) if entries else []
     data["winners_selected"] = winners
     save_database()
 
@@ -1497,11 +1692,11 @@ async def finish_giveaway(message_id, automatic=False):
     if channel:
         try:
             message = await channel.fetch_message(int(message_id))
-            ended_embed = create_giveaway_embed(data)
-            ended_embed.title = "🎉 GIVEAWAY ENDED 🎉"
+            ended_embed = create_giveaway_embed(data, channel.guild)
+            ended_embed.title = f"{premium_emoji(channel.guild, 'giveaway', '🎉')} GIVEAWAY ENDED {premium_emoji(channel.guild, 'giveaway', '🎉')}"
             ended_embed.color = discord.Color.dark_gold()
             ended_embed.add_field(name="Status", value="Ended", inline=True)
-            await message.edit(embed=ended_embed, view=GiveawayView(disabled=True))
+            await message.edit(embed=ended_embed, view=GiveawayView(disabled=True, guild=channel.guild))
         except (discord.NotFound, discord.HTTPException):
             pass
         mentions = " ".join(f"<@{uid}>" for uid in winners) or "Nobody"
@@ -1611,7 +1806,7 @@ async def giveaway_start(
         "duration": duration,
     }
     await interaction.response.defer(ephemeral=True)
-    message = await target.send(embed=create_giveaway_embed(data), view=GiveawayView())
+    message = await target.send(embed=create_giveaway_embed(data, interaction.guild), view=GiveawayView(guild=interaction.guild))
     db["giveaways"][str(message.id)] = data
     save_database()
     start_giveaway_task(message.id)
@@ -1635,10 +1830,10 @@ async def giveaway_reroll(interaction, message_id: str):
     data = db["giveaways"].get(str(message_id))
     if not data or not data.get("ended"):
         return await interaction.response.send_message(embed=error_embed("Not Found", "That ended giveaway could not be found."), ephemeral=True)
-    entries = list(dict.fromkeys(data.get("entries", [])))
+    entries = list(data.get("entries", []))
     if not entries:
         return await interaction.response.send_message(embed=error_embed("No Entries", "Nobody entered."), ephemeral=True)
-    winners = random.sample(entries, min(int(data["winners"]), len(entries)))
+    winners = choose_weighted_winners(entries, data["winners"])
     data["winners_selected"] = winners
     save_database()
     mentions = " ".join(f"<@{uid}>" for uid in winners)
@@ -4399,29 +4594,13 @@ Back to Giveaways
 
                 elif action == "reroll":
 
-                    entries = list(
-                        dict.fromkeys(
-                            giveaway.get(
-                                "entries",
-                                []
-                            )
-                        )
-                    )
+                    entries = list(giveaway.get("entries", []))
 
                     if entries:
 
-                        winners = random.sample(
-
+                        winners = choose_weighted_winners(
                             entries,
-
-                            min(
-                                int(
-                                    giveaway[
-                                        "winners"
-                                    ]
-                                ),
-                                len(entries)
-                            )
+                            giveaway["winners"]
                         )
 
                         giveaway[
@@ -4591,6 +4770,8 @@ async def on_app_command_error(interaction, error):
 # READY
 # ============================================================
 
+_persistent_views_registered = False
+
 @bot.event
 async def on_ready():
     print("=" * 60)
@@ -4613,10 +4794,16 @@ async def on_ready():
         print(f"Slash sync error: {error}")
 
     await cache_all_invites()
-    bot.add_view(TicketPanelView())
-    bot.add_view(TicketControlsView())
-    bot.add_view(ClosedTicketView())
-    bot.add_view(GiveawayView())
+    # Register persistent handlers once. New messages are created with the
+    # server's premium emojis; these generic views only handle interactions
+    # after a restart.
+    global _persistent_views_registered
+    if not _persistent_views_registered:
+        bot.add_view(TicketPanelView())
+        bot.add_view(TicketControlsView())
+        bot.add_view(ClosedTicketView())
+        bot.add_view(GiveawayView())
+        _persistent_views_registered = True
     start_dashboard()
     await bot.change_presence(activity=discord.Game(name=".help • Visto"))
 

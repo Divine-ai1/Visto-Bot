@@ -779,6 +779,142 @@ async def invites_command(interaction, user: discord.Member = None):
 async def invites_prefix(ctx, member: discord.Member = None):
     member = member or ctx.author
     await ctx.send(embed=build_invite_embed(member, get_invite_stats(ctx.guild.id, member.id)))
+    # ============================================================
+# INVITED COMMANDS
+# ============================================================
+
+def get_invited_members(guild, inviter_id):
+    data = get_guild_data(
+        "invite_members",
+        guild.id
+    )
+
+    members = []
+
+    for member_id, history in data.items():
+
+        if str(history.get("inviter_id")) != str(inviter_id):
+            continue
+
+        # Don't show members who have currently left
+        if history.get("currently_left", False):
+            continue
+
+        member = guild.get_member(
+            int(member_id)
+        )
+
+        if member and not member.bot:
+            members.append(member)
+
+    members.sort(
+        key=lambda member: member.display_name.lower()
+    )
+
+    return members
+
+
+# ============================================================
+# -invited
+# ============================================================
+
+@bot.command(name="invited")
+async def invited_prefix(ctx, member: discord.Member = None):
+
+    member = member or ctx.author
+
+    invited_members = get_invited_members(
+        ctx.guild,
+        member.id
+    )
+
+    if not invited_members:
+        return await ctx.send(
+            embed=info_embed(
+                "Invited Members",
+                f"{member.mention} has not invited any currently active members."
+            )
+        )
+
+    lines = []
+
+    for number, invited in enumerate(
+        invited_members,
+        start=1
+    ):
+        lines.append(
+            f"**#{number}** {invited.mention}"
+        )
+
+    embed = discord.Embed(
+        title=f"📨 Members Invited by {member.display_name}",
+        description="\n".join(lines[:50]),
+        color=VISTO_COLOR
+    )
+
+    embed.set_footer(
+        text=f"Total: {len(invited_members)} • Visto Bot"
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+# ============================================================
+# /invited
+# ============================================================
+
+@bot.tree.command(
+    name="invited",
+    description="Show the members invited by a user"
+)
+@app_commands.describe(
+    user="User whose invited members you want to see"
+)
+async def invited_slash(
+    interaction: discord.Interaction,
+    user: discord.Member = None
+):
+
+    user = user or interaction.user
+
+    invited_members = get_invited_members(
+        interaction.guild,
+        user.id
+    )
+
+    if not invited_members:
+        return await interaction.response.send_message(
+            embed=info_embed(
+                "Invited Members",
+                f"{user.mention} has not invited any currently active members."
+            )
+        )
+
+    lines = []
+
+    for number, invited in enumerate(
+        invited_members,
+        start=1
+    ):
+        lines.append(
+            f"**#{number}** {invited.mention}"
+        )
+
+    embed = discord.Embed(
+        title=f"📨 Members Invited by {user.display_name}",
+        description="\n".join(lines[:50]),
+        color=VISTO_COLOR
+    )
+
+    embed.set_footer(
+        text=f"Total: {len(invited_members)} • Visto Bot"
+    )
+
+    await interaction.response.send_message(
+        embed=embed
+    )
 
 
 # ============================================================

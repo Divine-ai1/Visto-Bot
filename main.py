@@ -28,7 +28,7 @@ STATS_PREFIX = "-"
 
 # Kept for compatibility with the existing config.
 # Message tracking now counts messages across the whole server.
-MESSAGE_COUNT_CHANNEL_ID = 1536711358433861683
+MESSAGE_COUNT_CHANNEL_ID = 1536682307530924083
 
 DB_FILE = "visto_data.json"
 

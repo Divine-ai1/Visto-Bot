@@ -1608,30 +1608,173 @@ def giveaway_entry_counts(data):
 
 def create_giveaway_embed(data, guild=None):
     end_time = int(data["end_time"])
-    giveaway_emoji = premium_emoji(guild, "giveaway")
-    embed = discord.Embed(
-        title=data.get("title") or f"{giveaway_emoji} GIVEAWAY {giveaway_emoji}",
-        description=data.get("description") or f"Click **{giveaway_emoji} Enter Giveaway** to participate!",
-        color=int(data.get("color", 15844367)),
+
+    giveaway_emoji = premium_emoji(
+        guild,
+        "giveaway",
+        "🎉"
     )
-    arrow = premium_emoji(guild, "arrow")
-    embed.add_field(name=f"{arrow} Prize", value=data["prize"], inline=False)
-    embed.add_field(name=f"{arrow} Winners", value=str(data["winners"]), inline=True)
-    embed.add_field(name=f"{arrow} Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
-    embed.add_field(name=f"{arrow} Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
-    embed.add_field(name=f"{arrow} Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
-    embed.add_field(name=f"{arrow} Ends", value=f"<t:{end_time}:R>", inline=True)
+
+    arrow = premium_emoji(
+        guild,
+        "arrow",
+        "➡️"
+    )
+
+    embed = discord.Embed(
+        title=data.get("title") or "Giveaway",
+        description=(
+            data.get("description")
+            or
+            f"Click {giveaway_emoji} to enter!"
+        ),
+        color=int(
+            data.get(
+                "color",
+                15844367
+            )
+        )
+    )
+
+    # Prize
+    embed.add_field(
+        name=f"{arrow} Prize",
+        value=data["prize"],
+        inline=False
+    )
+
+    # Winners
+    embed.add_field(
+        name=f"{arrow} Winners",
+        value=str(data["winners"]),
+        inline=False
+    )
+
+    # Host
+    embed.add_field(
+        name=f"{arrow} Hosted by",
+        value=(
+            data.get("host_text")
+            or
+            f"<@{data['host_id']}>"
+        ),
+        inline=False
+    )
+
+    # Ends
+    embed.add_field(
+        name=f"{arrow} Ends",
+        value=f"<t:{end_time}:R>",
+        inline=False
+    )
+
+    # Extra Entries
+    if (
+        data.get("extra_role_id")
+        and
+        int(
+            data.get(
+                "extra_entries",
+                0
+            )
+        ) > 0
+    ):
+        embed.add_field(
+            name="Extra Entries",
+            value=(
+                f"<@&{data['extra_role_id']}>: "
+                f"{data['extra_entries']} entries"
+            ),
+            inline=False
+        )
+
+    # Required Role
     if data.get("required_role_id"):
-        embed.add_field(name=f"{arrow} Required Role", value=f"<@&{data['required_role_id']}>", inline=True)
+        embed.add_field(
+            name="Must have the roles",
+            value=(
+                f"<@&{data['required_role_id']}>"
+            ),
+            inline=False
+        )
+
+    # Blacklisted Role
     if data.get("blacklisted_role_id"):
-        embed.add_field(name=f"{arrow} Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>", inline=True)
-    if data.get("extra_role_id") and int(data.get("extra_entries", 0)) > 0:
-        embed.add_field(name=f"{arrow} Extra Entries", value=f"<@&{data['extra_role_id']}> = {data['extra_entries']} total entries", inline=False)
+        embed.add_field(
+            name="Cannot have the role",
+            value=(
+                f"<@&{data['blacklisted_role_id']}>"
+            ),
+            inline=False
+        )
+
+    # Minimum account age
+    if int(
+        data.get(
+            "min_account_age_days",
+            0
+        )
+    ) > 0:
+        embed.add_field(
+            name="Account Requirement",
+            value=(
+                f"{data['min_account_age_days']} "
+                "days old minimum"
+            ),
+            inline=False
+        )
+
+    # Minimum server membership
+    if int(
+        data.get(
+            "min_server_days",
+            0
+        )
+    ) > 0:
+        embed.add_field(
+            name="Server Requirement",
+            value=(
+                f"{data['min_server_days']} "
+                "days in the server minimum"
+            ),
+            inline=False
+        )
+
+    # Current entry count
+    counts = giveaway_entry_counts(data)
+
+    embed.add_field(
+        name="Participants",
+        value=str(
+            len(counts)
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Entries",
+        value=str(
+            sum(counts.values())
+        ),
+        inline=False
+    )
+
+    # Optional image
     if data.get("image"):
-        embed.set_image(url=data["image"])
+        embed.set_image(
+            url=data["image"]
+        )
+
+    # Optional thumbnail
     if data.get("thumbnail"):
-        embed.set_thumbnail(url=data["thumbnail"])
-    embed.set_footer(text="Visto Giveaways")
+        embed.set_thumbnail(
+            url=data["thumbnail"]
+        )
+
+    embed.set_footer(
+        text="Visto Giveaways"
+    )
+
     return embed
 
 

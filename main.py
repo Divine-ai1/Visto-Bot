@@ -11,33 +11,45 @@ from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timezone, timedelta
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 
-
 # ============================================================
-# CONFIG
+# CONFIG — EDIT THESE IN THIS FILE
 # ============================================================
 
+# Keep the Discord token in Render's secret/environment.
 TOKEN = os.getenv("TOKEN")
 
 PREFIX = "."
-
-# Falcon-style special prefixes for statistics commands only.
 STATS_PREFIX = "-"
 
-# Kept for compatibility with the existing config.
-# Message tracking now counts messages across the whole server.
-MESSAGE_COUNT_CHANNEL_ID = 1536711358433861683
+# MESSAGE COUNTING: ONLY this ONE channel counts.
+# Put your #general channel ID here. This is FILE-ONLY; dashboard settings are ignored.
+GENERAL_CHANNEL_ID = 1536711358433861683
+
+# Put your server ID here for instant slash-command updates.
+# Set to 0 if you want global-only sync (global commands can take time to appear).
+GUILD_ID = 0
+
+# DASHBOARD: edit the password HERE, not in an environment variable.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
+DASHBOARD_HOST = "0.0.0.0"
+# Render exposes the web service port. The app still needs Render's PORT.
+DASHBOARD_PORT = int(os.getenv("PORT", "10000"))
 
 DB_FILE = "visto_data.json"
 
+# Optional ticket configuration. The dashboard can also update these values.
+BUY_CATEGORY_ID = 1536720924039184404
+CLAIM_CATEGORY_ID = 1536695031199567882
+SUPPORT_CATEGORY_ID = 1536721072622149632
+TICKET_STAFF_ROLE_ID = 1536708388635803658
 
 if not TOKEN:
     raise RuntimeError(
-        "TOKEN secret was not found. Make sure your Render Environment Variable is named TOKEN."
+        "TOKEN was not found. Add TOKEN in Render Environment Variables."
     )
-
 
 # ============================================================
 # DATABASE
@@ -52,58 +64,52 @@ DEFAULT_DATABASE = {
     "settings": {},
     "giveaways": {},
     "tickets": {},
-    "autoresponders": {}
+    "autoresponders": {},
 }
+
+DB_LOCK = threading.RLock()
 
 
 def load_database():
     if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w") as file:
+        with open(DB_FILE, "w", encoding="utf-8") as file:
             json.dump(DEFAULT_DATABASE, file, indent=4)
-
-        return DEFAULT_DATABASE.copy()
+        return {k: {} for k in DEFAULT_DATABASE}
 
     try:
-        with open(DB_FILE, "r") as file:
+        with open(DB_FILE, "r", encoding="utf-8") as file:
             loaded = json.load(file)
-
         for key in DEFAULT_DATABASE:
-            if key not in loaded:
-                loaded[key] = {}
-
+            loaded.setdefault(key, {})
         return loaded
-
-    except Exception:
-        return DEFAULT_DATABASE.copy()
+    except Exception as error:
+        print(f"Database load error: {error}")
+        return {k: {} for k in DEFAULT_DATABASE}
 
 
 db = load_database()
-DB_LOCK = threading.RLock()
 
 
 def save_database():
     with DB_LOCK:
-        temp_file = DB_FILE + ".tmp"
-        with open(temp_file, "w") as file:
+        temporary = DB_FILE + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as file:
             json.dump(db, file, indent=4)
-        os.replace(temp_file, DB_FILE)
+        os.replace(temporary, DB_FILE)
 
 
 def get_guild_data(category, guild_id):
     guild_id = str(guild_id)
-
-    if guild_id not in db[category]:
-        db[category][guild_id] = {}
-
+    db.setdefault(category, {})
+    db[category].setdefault(guild_id, {})
     return db[category][guild_id]
 
 
 # ============================================================
-# INTENTS
+# DISCORD CLIENT
 # ============================================================
 
 intents = discord.Intents.default()
-
 intents.guilds = True
 intents.members = True
 intents.messages = True
@@ -111,43 +117,59 @@ intents.message_content = True
 intents.invites = True
 
 
-# ============================================================
-# BOT
-# ============================================================
-
 def get_command_prefix(bot_instance, message):
-    # Only the statistics commands use Falcon-style `-i` and `-m`.
-    # All other prefix commands continue using the normal `.` prefix.
-    content = getattr(message, "content", "") or ""
-    stripped = content.lstrip().lower()
-
-    special_commands = ("-i", "-m", "-invited", "-lb")
-    if any(
-        stripped == command or stripped.startswith(command + " ")
-        for command in special_commands
-    ):
-        return STATS_PREFIX
-
+    content = (getattr(message, "content", "") or "").lstrip().lower()
+    specials = ("-i", "-m", "-invited", "-lb")
+    for command in specials:
+        if content == command or content.startswith(command + " "):
+            return STATS_PREFIX
     return PREFIX
 
 
 bot = commands.Bot(
     command_prefix=get_command_prefix,
     intents=intents,
-    help_command=None
+    help_command=None,
 )
 
 
 # ============================================================
-# EMBED HELPERS
+# EMBEDS / UTILS
 # ============================================================
+
+VISTO_COLOR = discord.Color.red()
+
+# Exact custom Discord emojis supplied for Visto Bot.
+# Arrow + giveaway are animated. The rest are static.
+PREMIUM_EMOJI_MARKUP = {
+    "arrow": "<a:vistoarrow:1537111766989799604>",
+    "giveaway": "<a:giveaway:1537091136244678716>",
+    "warn": "<:warn:1537389534688444437>",
+    "ban": "<:ban:1537389484662849536>",
+    "ticket": "<:ticket:1537091039515385866>",
+    "mod": "<:mod:1537091003306213416>",
+}
+
+
+def premium_emoji(guild, name, fallback=""):
+    """Return Visto custom emoji markup; never invent a Unicode replacement."""
+    return PREMIUM_EMOJI_MARKUP.get(name, fallback)
+
+
+def premium_emoji_obj(guild, name, fallback=None):
+    """Return Visto custom emoji object for Discord components."""
+    markup = PREMIUM_EMOJI_MARKUP.get(name)
+    if markup:
+        return discord.PartialEmoji.from_str(markup)
+    return fallback
+
 
 def success_embed(title, description):
     return discord.Embed(
         title=f"✅ {title}",
         description=description,
         color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
 
 
@@ -156,7 +178,7 @@ def error_embed(title, description):
         title=f"❌ {title}",
         description=description,
         color=discord.Color.red(),
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
 
 
@@ -165,710 +187,531 @@ def info_embed(title, description):
         title=f"ℹ️ {title}",
         description=description,
         color=discord.Color.blurple(),
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
 
 
 def warning_embed(title, description):
     return discord.Embed(
-        title=f"⚠️ {title}",
+        title=f"{premium_emoji(None, 'warn', '<:warn:1537389534688444437>')} {title}",
         description=description,
         color=discord.Color.orange(),
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
 
 
-# ============================================================
-# LOGGING
-# ============================================================
+def duration_parser(text):
+    if not text:
+        return None
+    text = text.lower().strip()
+    matches = re.findall(r"(\d+)\s*(mo|y|d|h|m|s)", text)
+    if not matches:
+        return None
+    rebuilt = "".join(f"{a}{u}" for a, u in matches)
+    if rebuilt != re.sub(r"\s+", "", text):
+        return None
+    total = 0
+    for amount, unit in matches:
+        n = int(amount)
+        total += {
+            "s": n,
+            "m": n * 60,
+            "h": n * 3600,
+            "d": n * 86400,
+            "mo": n * 30 * 86400,
+            "y": n * 365 * 86400,
+        }[unit]
+    return total
 
-async def send_log(
-    guild,
-    title,
-    description,
-    color=discord.Color.blurple()
-):
 
+async def safe_dm(user, embed):
+    try:
+        await user.send(embed=embed)
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+
+
+async def send_log(guild, title, description, color=discord.Color.blurple()):
     if guild is None:
         return
-
     settings = get_guild_data("settings", guild.id)
-
     channel_id = settings.get("log_channel")
-
     if not channel_id:
         return
-
     channel = guild.get_channel(int(channel_id))
-
-    if channel is None:
+    if not channel:
         return
-
     embed = discord.Embed(
         title=title,
         description=description,
         color=color,
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
-
     embed.set_footer(text="Visto Logging")
-
     try:
         await channel.send(embed=embed)
-    except Exception as error:
-        print(f"Logging error: {error}")
+    except discord.HTTPException:
+        pass
 
 
-# ============================================================
-# INVITE CACHE
-# ============================================================
-
-invite_cache = {}
-vanity_cache = {}
-
-
-async def cache_guild_invites(guild):
-    try:
-        invites = await guild.invites()
-
-        invite_cache[guild.id] = {
-            invite.code: {
-                "uses": invite.uses or 0,
-                "inviter": invite.inviter.id if invite.inviter else None
-            }
-            for invite in invites
-        }
-
-        # Vanity URL joins are tracked separately and NEVER credited
-        # to an inviter.
-        vanity_cache[guild.id] = None
-
-        try:
-            vanity_invite = await guild.vanity_invite()
-            if vanity_invite:
-                vanity_cache[guild.id] = {
-                    "code": vanity_invite.code,
-                    "uses": vanity_invite.uses or 0
-                }
-        except (discord.Forbidden, discord.HTTPException, AttributeError):
-            pass
-
-    except Exception as error:
-        print(f"Could not cache invites for {guild.name}: {error}")
-
-
-async def cache_all_invites():
-
-    for guild in bot.guilds:
-        await cache_guild_invites(guild)
-
-
-# ============================================================
-# DURATION PARSER
-# ============================================================
-
-def parse_duration(text):
-
-    if not text:
-        return None
-
-    text = text.lower().strip()
-
-    pattern = r"(\d+)\s*(mo|y|d|h|m|s)"
-
-    matches = re.findall(pattern, text)
-
-    if not matches:
-        return None
-
-    rebuilt = "".join(
-        f"{amount}{unit}"
-        for amount, unit in matches
-    )
-
-    cleaned = re.sub(r"\s+", "", text)
-
-    if rebuilt != cleaned:
-        return None
-
-    total_seconds = 0
-
-    for amount, unit in matches:
-
-        amount = int(amount)
-
-        if unit == "s":
-            total_seconds += amount
-
-        elif unit == "m":
-            total_seconds += amount * 60
-
-        elif unit == "h":
-            total_seconds += amount * 60 * 60
-
-        elif unit == "d":
-            total_seconds += amount * 24 * 60 * 60
-
-        elif unit == "mo":
-            total_seconds += amount * 30 * 24 * 60 * 60
-
-        elif unit == "y":
-            total_seconds += amount * 365 * 24 * 60 * 60
-
-    return total_seconds
-
-
-# ============================================================
-# GIVEAWAY STORAGE
-# ============================================================
-
-giveaway_tasks = {}
-
-
-def giveaway_key(message_id):
-    return str(message_id)
-
-
-# ============================================================
-# GIVEAWAY VIEW
-# ============================================================
-
-class GiveawayView(discord.ui.View):
-
-    def __init__(self, message_id=None, disabled=False):
-
-        super().__init__(
-            timeout=None
+async def ask_reason(interaction, title, prompt):
+    class ReasonModal(discord.ui.Modal, title=title):
+        reason = discord.ui.TextInput(
+            label="Reason",
+            placeholder=prompt,
+            required=True,
+            max_length=1000,
+            style=discord.TextStyle.paragraph,
         )
 
-        self.message_id = message_id
+        async def on_submit(self, modal_interaction):
+            await modal_interaction.response.defer(ephemeral=True)
+            self.result = str(self.reason.value)
+            self.done.set()
 
-        if disabled:
-            self.enter_button.disabled = True
-
-    @discord.ui.button(
-        label="Enter Giveaway",
-        emoji="🎉",
-        style=discord.ButtonStyle.success,
-        custom_id="visto_giveaway_enter"
-    )
-    async def enter_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        message_id = str(
-            interaction.message.id
-        )
-
-        giveaway = db["giveaways"].get(
-            message_id
-        )
-
-        if not giveaway:
-            return await interaction.response.send_message(
-                embed=error_embed(
-                    "Giveaway Not Found",
-                    "This giveaway no longer exists."
-                ),
-                ephemeral=True
-            )
-
-        if giveaway.get("ended"):
-            return await interaction.response.send_message(
-                embed=warning_embed(
-                    "Giveaway Ended",
-                    "This giveaway has already ended."
-                ),
-                ephemeral=True
-            )
-
-        user_id = interaction.user.id
-
-        if user_id in giveaway["entries"]:
-
-            return await interaction.response.send_message(
-                embed=warning_embed(
-                    "Already Entered",
-                    "You are already entered in this giveaway."
-                ),
-                ephemeral=True
-            )
-
-        giveaway["entries"].append(user_id)
-
-        save_database()
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Giveaway Entry",
-                "You have successfully entered the giveaway! 🎉"
-            ),
-            ephemeral=True
-        )
+    modal = ReasonModal()
+    modal.done = asyncio.Event()
+    modal.result = None
+    await interaction.response.send_modal(modal)
+    await modal.done.wait()
+    return modal.result
 
 
 # ============================================================
-# GIVEAWAY EMBED
+# HELP
 # ============================================================
 
-def create_giveaway_embed(giveaway):
-
-    end_time = int(
-        giveaway["end_time"]
-    )
-
-    entries = len(
-        giveaway["entries"]
-    )
-
+def help_embed(guild=None):
+    mod_emoji = premium_emoji(guild, "mod")
+    ticket_emoji = premium_emoji(guild, "ticket")
+    giveaway_emoji = premium_emoji(guild, "giveaway")
+    arrow = premium_emoji(guild, "arrow")
     embed = discord.Embed(
-        title="🎉 GIVEAWAY 🎉",
-        description=(
-            "Click the **🎉 Enter Giveaway** button below "
-            "to participate!"
+        title=f"{mod_emoji} Visto",
+        description=f"All-in-one Discord bot\nPrefix: `{PREFIX}`",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name=f"{arrow} Moderation",
+        value=(
+            f"{arrow} `/ban` `/unban` `/kick` `/timeout`\n"
+            f"{arrow} `/warn` `/warnings` `/delwarn` `/purge`\n"
+            f"{arrow} `/lock` `/unlock` `/lockdown` `/unlockdown`"
         ),
-        color=discord.Color.gold()
+        inline=False,
     )
-
     embed.add_field(
-        name="🎁 Prize",
-        value=giveaway["prize"],
-        inline=False
+        name=f"{arrow} Stats",
+        value=(
+            f"{arrow} `/messages` `-m` `.m`\n"
+            f"{arrow} `/invites` `-i` `.i`\n"
+            f"{arrow} `-lb invites` `-lb messages`\n"
+            f"{arrow} `.resetall messages` `.resetall invites`"
+        ),
+        inline=False,
     )
-
     embed.add_field(
-        name="🏆 Winners",
-        value=str(giveaway["winners"]),
-        inline=True
+        name=f"{arrow} Tickets",
+        value=(
+            f"{arrow} `/ticket setup` `/ticket close`\n"
+            f"{arrow} `/user add`"
+        ),
+        inline=False,
     )
-
     embed.add_field(
-        name="👤 Hosted By",
-        value=f"<@{giveaway['host_id']}>",
-        inline=True
+        name=f"{arrow} Giveaways",
+        value=(
+            f"{arrow} `/giveaway start` `/giveaway end`\n"
+            f"{arrow} `/giveaway reroll` `/giveaway pause`\n"
+            f"{arrow} `/giveaway resume` `/giveaway delete`"
+        ),
+        inline=False,
     )
-
     embed.add_field(
-        name="👥 Entries",
-        value=f"{entries:,}",
-        inline=True
+        name=f"{arrow} Utility",
+        value=(
+            f"{arrow} `.say` `/autoresponder add`\n"
+            f"{arrow} `/autoresponder remove` `/autoresponder list`"
+        ),
+        inline=False,
     )
-
-    embed.add_field(
-        name="⏰ Ends",
-        value=f"<t:{end_time}:R>",
-        inline=True
-    )
-
-    embed.add_field(
-        name="📅 End Time",
-        value=f"<t:{end_time}:F>",
-        inline=True
-    )
-
-    embed.set_footer(
-        text="Visto Giveaways"
-    )
-
     return embed
 
 
+@bot.tree.command(name="help", description="Show bot commands")
+async def slash_help(interaction):
+    await interaction.response.send_message(embed=help_embed(interaction.guild))
+
+
+@bot.command(name="help")
+async def prefix_help(ctx):
+    await ctx.send(embed=help_embed(ctx.guild))
+
+
 # ============================================================
-# GIVEAWAY END FUNCTION
+# MESSAGE SYSTEM — GENERAL CHANNEL ONLY
 # ============================================================
 
-async def finish_giveaway(
-    message_id,
-    automatic=False
-):
-
-    message_id = str(message_id)
-
-    giveaway = db["giveaways"].get(
-        message_id
-    )
-
-    if not giveaway:
+def get_message_count_channel(guild):
+    # FILE-ONLY CONFIGURATION:
+    # Only the channel ID in GENERAL_CHANNEL_ID is counted.
+    # Dashboard settings are intentionally ignored for message counting.
+    if not GENERAL_CHANNEL_ID or GENERAL_CHANNEL_ID == 123456789012345678:
         return None
 
-    if giveaway.get("ended"):
-        return None
+    return guild.get_channel(int(GENERAL_CHANNEL_ID))
 
-    giveaway["ended"] = True
 
-    channel = bot.get_channel(
-        int(giveaway["channel_id"])
+def get_message_count(guild_id, user_id):
+    return int(get_guild_data("messages", guild_id).get(str(user_id), 0))
+
+
+def get_daily_message_count(guild_id, user_id):
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return int(
+        get_guild_data("message_daily", guild_id)
+        .get(today, {})
+        .get(str(user_id), 0)
     )
 
-    winners = []
 
-    entries = list(
-        giveaway["entries"]
+def build_messages_embed(user, count, today_count, channel):
+    arrow = premium_emoji(user.guild, "arrow")
+    embed = discord.Embed(
+        title=f"{arrow} Message COUNT",
+        description=(
+            f"{arrow} **All Time Messages:** `{count:,}`\n"
+            f"{arrow} **Daily Messages:** `{today_count:,}`\n\n"
+            f"{arrow} **Counting Channel:** {channel.mention if channel else 'Not configured'}"
+        ),
+        color=VISTO_COLOR,
     )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text="Visto Message Statistics")
+    return embed
 
-    if entries:
 
-        winner_count = min(
-            giveaway["winners"],
-            len(entries)
+class MessageLeaderboardView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=180)
+        self.guild = ctx.guild
+        self.page = 0
+        self.per_page = 10
+        self.previous.emoji = premium_emoji_obj(self.guild, "arrow", "◀")
+        self.next.emoji = premium_emoji_obj(self.guild, "arrow", "▶")
+        self.refresh_buttons()
+
+    def rows(self):
+        data = get_guild_data("messages", self.guild.id)
+        return sorted(
+            [(uid, int(v)) for uid, v in data.items() if int(v) > 0],
+            key=lambda x: x[1],
+            reverse=True,
         )
 
-        winners = random.sample(
-            entries,
-            winner_count
-        )
+    def pages(self):
+        rows = self.rows()
+        return max(1, (len(rows) + self.per_page - 1) // self.per_page)
 
-    if channel:
+    def refresh_buttons(self):
+        pages = self.pages()
+        self.first.disabled = self.page <= 0
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= pages - 1
+        self.last.disabled = self.page >= pages - 1
 
-        try:
-
-            message = await channel.fetch_message(
-                int(message_id)
-            )
-
-            disabled_view = GiveawayView(
-                message_id,
-                disabled=True
-            )
-
-            embed = create_giveaway_embed(
-                giveaway
-            )
-
-            embed.title = "🎉 GIVEAWAY ENDED 🎉"
-            embed.color = discord.Color.dark_gold()
-
-            embed.set_field_at(
-                4,
-                name="⏰ Status",
-                value="Ended",
-                inline=True
-            )
-
-            await message.edit(
-                embed=embed,
-                view=disabled_view
-            )
-
-        except Exception as error:
-            print(
-                f"Could not edit giveaway message: {error}"
-            )
-
-        if winners:
-
-            mentions = " ".join(
-                f"<@{user_id}>"
-                for user_id in winners
-            )
-
-            result_embed = discord.Embed(
-                title="🎉 GIVEAWAY ENDED",
-                description=(
-                    f"**Prize:** {giveaway['prize']}\n\n"
-                    f"**Winner(s):**\n{mentions}\n\n"
-                    "Congratulations! 🎊"
-                ),
-                color=discord.Color.gold()
-            )
-
-        else:
-
-            result_embed = warning_embed(
-                "Giveaway Ended",
-                "Nobody entered this giveaway."
-            )
-
-        try:
-            await channel.send(
-                embed=result_embed
-            )
-        except Exception as error:
-            print(
-                f"Giveaway announcement error: {error}"
-            )
-
-    giveaway["winners_selected"] = winners
-
-    save_database()
-
-    guild = bot.get_guild(
-        int(giveaway["guild_id"])
-    )
-
-    if guild:
-
-        winner_text = (
-            " ".join(
-                f"<@{uid}>"
-                for uid in winners
-            )
-            if winners
-            else "Nobody"
-        )
-
-        await send_log(
-            guild,
-            "🎉 Giveaway Ended",
-            (
-                f"**Prize:** {giveaway['prize']}\n"
-                f"**Winner(s):** {winner_text}\n"
-                f"**Message ID:** `{message_id}`"
+    def make_embed(self):
+        rows = self.rows()
+        pages = self.pages()
+        chunk = rows[self.page * self.per_page : (self.page + 1) * self.per_page]
+        lines = []
+        for idx, (uid, amount) in enumerate(chunk, start=self.page * self.per_page + 1):
+            member = self.guild.get_member(int(uid))
+            mention = member.mention if member else f"<@{uid}>"
+            lines.append(f"**#{idx}** {mention} • `{amount:,}` messages")
+        if not lines:
+            lines = ["No message statistics recorded yet."]
+        channel = get_message_count_channel(self.guild)
+        embed = discord.Embed(
+            title="📊 Message Leaderboard",
+            description=(
+                f"Counting only {channel.mention if channel else 'the configured General channel'}.\n\n"
+                + "\n".join(lines)
             ),
-            discord.Color.gold()
+            color=VISTO_COLOR,
         )
+        embed.set_footer(text=f"Page {self.page + 1}/{pages} • Visto")
+        return embed
 
-    return winners
+    async def update(self, interaction):
+        self.refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
+    async def first(self, interaction, button):
+        self.page = 0
+        await self.update(interaction)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.page = max(0, self.page - 1)
+        await self.update(interaction)
+
+    @discord.ui.button(label="⏹", style=discord.ButtonStyle.secondary)
+    async def stop_button(self, interaction, button):
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        self.page = min(self.pages() - 1, self.page + 1)
+        await self.update(interaction)
+
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    async def last(self, interaction, button):
+        self.page = self.pages() - 1
+        await self.update(interaction)
 
 
-# ============================================================
-# GIVEAWAY TASK
-# ============================================================
-
-async def giveaway_timer(message_id):
-
-    message_id = str(message_id)
-
-    giveaway = db["giveaways"].get(
-        message_id
+@bot.tree.command(name="messages", description="Show message statistics")
+@app_commands.describe(user="User to check")
+async def messages_command(interaction, user: discord.Member = None):
+    user = user or interaction.user
+    channel = get_message_count_channel(interaction.guild)
+    await interaction.response.send_message(
+        embed=build_messages_embed(
+            user,
+            get_message_count(interaction.guild.id, user.id),
+            get_daily_message_count(interaction.guild.id, user.id),
+            channel,
+        )
     )
 
-    if not giveaway:
-        return
 
-    while not giveaway.get("ended"):
-
-        current = datetime.now(
-            timezone.utc
-        ).timestamp()
-
-        remaining = giveaway["end_time"] - current
-
-        if remaining <= 0:
-            await finish_giveaway(
-                message_id,
-                automatic=True
-            )
-            break
-
-        await asyncio.sleep(
-            min(30, max(1, remaining))
+@bot.command(name="m")
+async def messages_prefix(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    channel = get_message_count_channel(ctx.guild)
+    await ctx.send(
+        embed=build_messages_embed(
+            member,
+            get_message_count(ctx.guild.id, member.id),
+            get_daily_message_count(ctx.guild.id, member.id),
+            channel,
         )
-
-
-def start_giveaway_task(message_id):
-
-    message_id = str(message_id)
-
-    if message_id in giveaway_tasks:
-        return
-
-    giveaway_tasks[message_id] = asyncio.create_task(
-        giveaway_timer(message_id)
     )
 
 
-async def restore_giveaways():
+@bot.command(name="messageleaderboard", aliases=["mlb"])
+async def message_leaderboard(ctx):
+    view = MessageLeaderboardView(ctx)
+    await ctx.send(embed=view.make_embed(), view=view)
 
-    now = datetime.now(
-        timezone.utc
-    ).timestamp()
 
-    for message_id, giveaway in list(
-        db["giveaways"].items()
-    ):
+class ResetAllView(discord.ui.View):
+    def __init__(self, reset_type, guild_id):
+        super().__init__(timeout=30)
+        self.reset_type = reset_type
+        self.guild_id = guild_id
 
-        if giveaway.get("ended"):
-            continue
-
-        if giveaway["end_time"] <= now:
-
-            await finish_giveaway(
-                message_id,
-                automatic=True
+    @discord.ui.button(label="Confirm Reset", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                embed=error_embed("No Permission", "Only administrators can do this."),
+                ephemeral=True,
             )
-
+        if self.reset_type == "messages":
+            db["messages"][str(self.guild_id)] = {}
+            db["message_daily"][str(self.guild_id)] = {}
+            message = "All-time and daily message statistics for **everyone** have been reset."
         else:
+            db["invites"][str(self.guild_id)] = {}
+            db["invite_members"][str(self.guild_id)] = {}
+            message = "Invite statistics for **everyone** have been reset."
+        save_database()
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=success_embed("Reset Complete", message), view=self)
+        await send_log(
+            interaction.guild,
+            "🗑️ Statistics Reset",
+            f"**Type:** {self.reset_type}\n**By:** {interaction.user.mention}\n**Scope:** Everyone",
+            discord.Color.red(),
+        )
 
-            start_giveaway_task(
-                message_id
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=info_embed("Cancelled", "Nothing was reset."), view=self)
+
+
+@bot.command(name="resetall")
+@commands.has_permissions(administrator=True)
+async def resetall(ctx, reset_type=None):
+    reset_type = (reset_type or "").lower()
+    if reset_type not in ("messages", "invites"):
+        return await ctx.send(
+            embed=info_embed(
+                "Reset All",
+                "Use `.resetall messages` or `.resetall invites`.\n\nThis affects **everyone** in the server.",
             )
+        )
+    await ctx.send(
+        embed=warning_embed(
+            f"Reset ALL {reset_type.title()}?",
+            f"This permanently resets {reset_type} statistics for **everyone** in this server.\n\nThis cannot be undone.",
+        ),
+        view=ResetAllView(reset_type, ctx.guild.id),
+    )
 
 
 # ============================================================
-# READY
+# MESSAGE EVENT — GENERAL CHANNEL ONLY
 # ============================================================
 
-@bot.event
-async def on_ready():
+# IMPORTANT:
+# This is the ONLY place where message statistics are incremented.
+# The channel is matched by its exact Discord channel ID.
 
-    print("=" * 50)
-    print(f"Visto connected as {bot.user}")
-    print(f"Connected to {len(bot.guilds)} server(s)")
-    print("=" * 50)
+def should_count_message(message):
+    if message.guild is None:
+        return False
+
+    if message.author.bot:
+        return False
 
     try:
+        configured_channel_id = int(GENERAL_CHANNEL_ID)
+    except (TypeError, ValueError):
+        return False
 
-        synced = await bot.tree.sync()
+    return message.channel.id == configured_channel_id
 
-        print(
-            f"Synced {len(synced)} slash commands."
-        )
-
-    except Exception as error:
-
-        print(
-            f"Slash sync error: {error}"
-        )
-
-    await cache_all_invites()
-
-    await restore_giveaways()
-
-    # Persistent button views survive bot restarts.
-    bot.add_view(TicketCreateView())
-    bot.add_view(TicketCloseView())
-    bot.add_view(ClosedTicketView())
-    bot.add_view(GiveawayView())
-
-    start_dashboard()
-
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Game(
-            name="-i | -m • Visto"
-        )
-    )
-
-
-# ============================================================
-# MESSAGE COUNT
-# ============================================================
 
 @bot.event
 async def on_message(message):
-
-    if message.author.bot:
-        return
-
-    # Falcon-style message tracking: count every non-bot message in the server.
-    if message.guild:
-        guild_messages = get_guild_data(
-            "messages",
-            message.guild.id
-        )
-
+    if should_count_message(message):
+        guild_messages = get_guild_data("messages", message.guild.id)
         user_id = str(message.author.id)
-        guild_messages[user_id] = guild_messages.get(user_id, 0) + 1
+        guild_messages[user_id] = int(guild_messages.get(user_id, 0)) + 1
 
-        # Keep a separate per-day counter so -m can show
-        # both the all-time and today's message totals.
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        daily = get_guild_data(
-            "message_daily",
-            message.guild.id
-        )
-        daily_today = daily.setdefault(today, {})
-        daily_today[user_id] = daily_today.get(user_id, 0) + 1
+        daily = get_guild_data("message_daily", message.guild.id)
+        today_data = daily.setdefault(today, {})
+        today_data[user_id] = int(today_data.get(user_id, 0)) + 1
 
         save_database()
 
-    # Autoresponder runs before prefix commands, but never on bot messages.
+    # Prefix commands and autoresponders still work in every channel.
     if message.guild:
         responders = get_guild_data("autoresponders", message.guild.id)
         content = message.content.strip().lower()
-        response_text = responders.get(content)
-        if response_text:
+
+        if content in responders:
             try:
-                await message.channel.send(response_text)
+                await message.channel.send(responders[content])
             except discord.HTTPException:
                 pass
 
     await bot.process_commands(message)
 
 
+@bot.tree.command(name="resetall", description="Reset statistics for everyone in this server")
+@app_commands.describe(type="What to reset")
+@app_commands.choices(type=[
+    app_commands.Choice(name="Messages", value="messages"),
+    app_commands.Choice(name="Invites", value="invites"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def resetall_slash(interaction, type: app_commands.Choice[str]):
+    await interaction.response.send_message(
+        embed=warning_embed(
+            f"Reset ALL {type.name}?",
+            f"This will permanently reset **{type.name.lower()}** statistics for **everyone** in this server.\n\nConfirm below."
+        ),
+        view=ResetAllView(type.value, interaction.guild.id),
+        ephemeral=True,
+    )
+
+
 # ============================================================
-# INVITE TRACKING
+# INVITE SYSTEM — NO STACKING REJOINS
 # ============================================================
+
+invite_cache = {}
+vanity_cache = {}
+
 
 def get_invite_stats(guild_id, inviter_id):
-    guild_invites = get_guild_data("invites", guild_id)
-    inviter_id = str(inviter_id)
-    current = guild_invites.get(inviter_id)
-
+    data = get_guild_data("invites", guild_id)
+    uid = str(inviter_id)
+    current = data.get(uid)
     if isinstance(current, (int, float)):
-        current = {
-            "joins": int(current),
-            "fake": 0,
-            "left": 0,
-            "rejoins": 0,
-            "total": int(current)
-        }
-
+        current = {"joins": int(current), "fake": 0, "left": 0, "rejoins": 0, "total": int(current)}
     if not isinstance(current, dict):
         current = {}
-
     current.setdefault("joins", 0)
     current.setdefault("fake", 0)
     current.setdefault("left", 0)
     current.setdefault("rejoins", 0)
     current.setdefault("total", 0)
     current["total"] = max(0, int(current["joins"]) - int(current["left"]))
-    guild_invites[inviter_id] = current
+    data[uid] = current
     return current
 
 
-def recompute_inviter_rejoins(guild_id, inviter_id):
-    members = get_guild_data("invite_members", guild_id)
-    count = 0
-    for history in members.values():
-        if str(history.get("inviter_id")) == str(inviter_id) and not history.get("currently_left", False) and history.get("has_left", False):
-            count += 1
+def get_invite_member_data(guild_id, member_id):
+    data = get_guild_data("invite_members", guild_id)
+    uid = str(member_id)
+    data.setdefault(uid, {})
+    h = data[uid]
+    h.setdefault("inviter_id", None)
+    h.setdefault("has_left", False)
+    h.setdefault("currently_left", False)
+    h.setdefault("last_join", None)
+    h.setdefault("last_leave", None)
+    return h
+
+
+def recompute_rejoins(guild_id, inviter_id):
     stats = get_invite_stats(guild_id, inviter_id)
+    count = 0
+    for history in get_guild_data("invite_members", guild_id).values():
+        if str(history.get("inviter_id")) == str(inviter_id):
+            if history.get("has_left") and not history.get("currently_left"):
+                count += 1
     stats["rejoins"] = count
     return stats
 
 
-def get_invite_member_data(guild_id, member_id):
-    guild_members = get_guild_data("invite_members", guild_id)
-    member_id = str(member_id)
-    if member_id not in guild_members:
-        guild_members[member_id] = {
-            "inviter_id": None,
-            "join_count": 0,
-            "has_left": False,
-            "currently_left": False,
-            "last_join": None,
-            "last_leave": None
-        }
-    data = guild_members[member_id]
-    data.setdefault("inviter_id", None)
-    data.setdefault("join_count", 0)
-    data.setdefault("has_left", bool(data.get("last_leave")))
-    data.setdefault("currently_left", bool(data.get("last_leave")))
-    data.setdefault("last_join", None)
-    data.setdefault("last_leave", None)
-    return data
-
-
-async def refresh_invite_cache_after_join(guild, new_invites):
-    invite_cache[guild.id] = {
-        invite.code: {
-            "uses": invite.uses or 0,
-            "inviter": invite.inviter.id if invite.inviter else None
-        }
-        for invite in new_invites
-    }
+async def cache_guild_invites(guild):
     try:
-        vanity_invite = await guild.vanity_invite()
-        vanity_cache[guild.id] = (
-            {"code": vanity_invite.code, "uses": vanity_invite.uses or 0}
-            if vanity_invite else None
-        )
-    except (discord.Forbidden, discord.HTTPException, AttributeError):
-        pass
+        invites = await guild.invites()
+        invite_cache[guild.id] = {
+            x.code: {"uses": x.uses or 0, "inviter": x.inviter.id if x.inviter else None}
+            for x in invites
+        }
+        vanity_cache[guild.id] = None
+        try:
+            vanity = await guild.vanity_invite()
+            if vanity:
+                vanity_cache[guild.id] = {"code": vanity.code, "uses": vanity.uses or 0}
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+    except Exception as error:
+        print(f"Invite cache error: {error}")
+
+
+async def cache_all_invites():
+    for guild in bot.guilds:
+        await cache_guild_invites(guild)
 
 
 @bot.event
@@ -876,88 +719,61 @@ async def on_member_join(member):
     guild = member.guild
     try:
         old_invites = invite_cache.get(guild.id, {})
-        old_vanity = vanity_cache.get(guild.id)
         new_invites = await guild.invites()
         used_invite = None
-
         for invite in new_invites:
-            old = old_invites.get(invite.code, {})
-            if (invite.uses or 0) > old.get("uses", 0):
+            if (invite.uses or 0) > old_invites.get(invite.code, {}).get("uses", 0):
                 used_invite = invite
                 break
 
         vanity_join = False
+        old_vanity = vanity_cache.get(guild.id)
         try:
-            vanity_invite = await guild.vanity_invite()
-            if vanity_invite:
-                old_uses = old_vanity.get("uses", 0) if old_vanity else 0
-                vanity_join = (vanity_invite.uses or 0) > old_uses
+            vanity = await guild.vanity_invite()
+            if vanity:
+                vanity_join = (vanity.uses or 0) > (old_vanity.get("uses", 0) if old_vanity else 0)
         except (discord.Forbidden, discord.HTTPException, AttributeError):
             pass
 
-        await refresh_invite_cache_after_join(guild, new_invites)
+        await cache_guild_invites(guild)
 
         history = get_invite_member_data(guild.id, member.id)
         inviter_id = history.get("inviter_id")
 
-        # A tracked member who is currently marked as left is a REJOIN.
-        # Rejoin is a state (0/1), never a stacking counter.
+        # Existing member who left before = REJOIN.
+        # It NEVER increases joins and NEVER makes rejoin 2/3/4.
         if inviter_id and history.get("currently_left"):
-            stats = get_invite_stats(guild.id, inviter_id)
             history["currently_left"] = False
             history["last_join"] = datetime.now(timezone.utc).timestamp()
-            history["join_count"] = int(history.get("join_count", 1)) + 1
-            stats = recompute_inviter_rejoins(guild.id, inviter_id)
+            stats = recompute_rejoins(guild.id, inviter_id)
             save_database()
-
             await send_log(
                 guild,
                 "🔁 Member Rejoined",
-                (
-                    f"**Member:** {member.mention}\n"
-                    f"**Inviter:** <@{inviter_id}>\n\n"
-                    f"**Joins:** `{stats['joins']}`\n"
-                    f"**Fake:** `{stats['fake']}`\n"
-                    f"**Left:** `{stats['left']}`\n"
-                    f"**Rejoin:** `1`"
-                ),
-                discord.Color.blurple()
+                f"**Member:** {member.mention}\n**Inviter:** <@{inviter_id}>\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `1`",
+                discord.Color.blurple(),
             )
             return
 
-        # New member / first tracked join. A rejoin is NOT a new join.
         if used_invite and used_invite.inviter and not vanity_join:
             inviter_id = str(used_invite.inviter.id)
             stats = get_invite_stats(guild.id, inviter_id)
             stats["joins"] += 1
             stats["total"] = max(0, stats["joins"] - stats["left"])
-
-            now = datetime.now(timezone.utc).timestamp()
             history["inviter_id"] = inviter_id
-            history["join_count"] = int(history.get("join_count", 0)) + 1
-            history["last_join"] = now
+            history["last_join"] = datetime.now(timezone.utc).timestamp()
             history["currently_left"] = False
             history.setdefault("has_left", False)
-            stats = recompute_inviter_rejoins(guild.id, inviter_id)
+            recompute_rejoins(guild.id, inviter_id)
             save_database()
-
             await send_log(
                 guild,
                 "📩 Member Joined Through Invite",
-                (
-                    f"**Member:** {member.mention}\n"
-                    f"**Inviter:** {used_invite.inviter.mention}\n"
-                    f"**Invite:** `{used_invite.code}`\n\n"
-                    f"**Joins:** `{stats['joins']}`\n"
-                    f"**Fake:** `{stats['fake']}`\n"
-                    f"**Left:** `{stats['left']}`\n"
-                    f"**Rejoin:** `0`"
-                ),
-                discord.Color.green()
+                f"**Member:** {member.mention}\n**Inviter:** {used_invite.inviter.mention}\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `0`",
+                discord.Color.green(),
             )
-
     except Exception as error:
-        print(f"Invite tracking error: {error}")
+        print(f"Invite join error: {error}")
 
 
 @bot.event
@@ -969,37 +785,24 @@ async def on_member_remove(member):
         if not inviter_id:
             return
 
-        # Count LEFT only once for this member. Every later leave/rejoin
-        # cycle toggles Rejoin 0/1 without stacking Left.
+        stats = get_invite_stats(guild.id, inviter_id)
+        # Each invited member contributes max ONE permanent left.
         if not history.get("has_left"):
-            stats = get_invite_stats(guild.id, inviter_id)
             stats["left"] += 1
-            stats["total"] = max(0, stats["joins"] - stats["left"])
             history["has_left"] = True
-        else:
-            stats = get_invite_stats(guild.id, inviter_id)
-
         history["currently_left"] = True
         history["last_leave"] = datetime.now(timezone.utc).timestamp()
-        stats = recompute_inviter_rejoins(guild.id, inviter_id)
+        recompute_rejoins(guild.id, inviter_id)
+        stats["total"] = max(0, stats["joins"] - stats["left"])
         save_database()
-
         await send_log(
             guild,
             "📤 Member Left",
-            (
-                f"**Member:** <@{member.id}>\n"
-                f"**Inviter:** <@{inviter_id}>\n\n"
-                f"**Joins:** `{stats['joins']}`\n"
-                f"**Fake:** `{stats['fake']}`\n"
-                f"**Left:** `{stats['left']}`\n"
-                f"**Rejoin:** `0`"
-            ),
-            discord.Color.orange()
+            f"**Member:** <@{member.id}>\n**Inviter:** <@{inviter_id}>\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `0`",
+            discord.Color.orange(),
         )
-
     except Exception as error:
-        print(f"Invite leave tracking error: {error}")
+        print(f"Invite leave error: {error}")
 
 
 @bot.event
@@ -1012,1536 +815,179 @@ async def on_invite_delete(invite):
     await cache_guild_invites(invite.guild)
 
 
-# ============================================================
-# HELP
-# ============================================================
-
-def help_embed():
-
+def build_invite_embed(user, stats):
+    arrow = premium_emoji(user.guild, "arrow")
     embed = discord.Embed(
-        title="🤖 Visto Help",
+        title=f"{arrow} Invite Tracker",
         description=(
-            "**Visto — All-in-one Discord Bot**\n\n"
-            f"Prefix: `{PREFIX}`\n"
-            "Slash commands are also supported."
+            f"{arrow} **Active Invites:** `{stats['total']}`\n\n"
+            f"{arrow} **Joins:** `{stats['joins']}`\n"
+            f"{arrow} **Fake:** `{stats.get('fake', 0)}`\n"
+            f"{arrow} **Left:** `{stats['left']}`\n"
+            f"{arrow} **Rejoins:** `{stats['rejoins']}`"
         ),
-        color=discord.Color.blurple()
-    )
-
-    embed.add_field(
-        name="🛡️ Moderation",
-        value=(
-            "`/ban`\n"
-            "`/kick`\n"
-            "`/timeout`\n"
-            "`/warn`\n"
-            "`/warnings`\n"
-            "`/purge`\n"
-            "`/lock`\n"
-            "`/unlock`\n"
-            "`/lockdown`\n"
-            "`/unlockdown`"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="📊 Statistics",
-        value=(
-            "`/messages` • `/invites`\n"
-            "`-m` • `-i` • `-invited` • `-lb`\n"
-            "`/leaderboard messages`\n"
-            "`/leaderboard invites`\n"
-            "`/add`\n"
-            "`/remove`\n"
-            "`/reset`\n"
-            "`/stats fake`"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="🎉 Giveaways",
-        value=(
-            "`/giveaway start`\n"
-            "`/giveaway end`\n"
-            "`/giveaway reroll`"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="🎫 Tickets",
-        value=(
-            "`/ticket setup`\n"
-            "`/ticket close`\n"
-            "`/user add`"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="⚙️ Configuration",
-        value=(
-            "`/setlog`\n"
-            "`/autoresponder_add`\n"
-            "`/autoresponder_remove`\n"
-            "`/autoresponder_list`\n"
-            "`/help`"
-        ),
-        inline=True
-    )
-
-    embed.set_footer(
-        text="Visto • Professional Discord Bot"
-    )
-
-    return embed
-
-
-@bot.tree.command(
-    name="help",
-    description="Show Visto commands"
-)
-async def slash_help(
-    interaction: discord.Interaction
-):
-
-    await interaction.response.send_message(
-        embed=help_embed()
-    )
-
-
-@bot.command(name="help")
-async def prefix_help(ctx):
-
-    await ctx.send(
-        embed=help_embed()
-    )
-
-
-# ============================================================
-# VISTO STATISTICS / FALCON-STYLE UI
-# ============================================================
-
-VISTO_STATS_COLOR = discord.Color.red()
-
-
-def format_stat_number(value):
-    return f"{int(value):,}"
-
-
-# ============================================================
-# MESSAGES
-# ============================================================
-
-
-def build_messages_embed(user, count, today_count):
-    embed = discord.Embed(
-        title=f"{user.display_name}'s Messages",
-        description=(
-            f"**All time:** {format_stat_number(count)} messages in this server !\n"
-            f"**Today:** {format_stat_number(today_count)} messages in this server !\n\n"
-            "▶️ Discover new events here!\n\n"
-            "Messages are being updated in real-time"
-        ),
-        color=VISTO_STATS_COLOR
+        color=VISTO_COLOR,
     )
     embed.set_thumbnail(url=user.display_avatar.url)
     return embed
 
 
-@bot.tree.command(
-    name="messages",
-    description="Show message statistics"
-)
-@app_commands.describe(
-    user="User to check"
-)
-async def messages_command(
-    interaction: discord.Interaction,
-    user: discord.Member = None
-):
+@bot.tree.command(name="invites", description="Show invite statistics")
+@app_commands.describe(user="User to check")
+async def invites_command(interaction, user: discord.Member = None):
     user = user or interaction.user
-    guild_messages = get_guild_data("messages", interaction.guild.id)
-    count = int(guild_messages.get(str(user.id), 0))
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    daily = get_guild_data("message_daily", interaction.guild.id)
-    today_count = int(daily.get(today, {}).get(str(user.id), 0))
-
-    await interaction.response.send_message(
-        embed=build_messages_embed(user, count, today_count)
-    )
-
-
-@bot.command(name="m")
-async def messages_prefix(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    guild_messages = get_guild_data("messages", ctx.guild.id)
-    count = int(guild_messages.get(str(member.id), 0))
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    daily = get_guild_data("message_daily", ctx.guild.id)
-    today_count = int(daily.get(today, {}).get(str(member.id), 0))
-
-    await ctx.send(embed=build_messages_embed(member, count, today_count))
-
-
-# ============================================================
-# INVITES
-# ============================================================
-
-
-def build_invite_embed(user, stats, requested_by=None):
-    embed = discord.Embed(
-        title="Invite log",
-        description=(
-            f"➤ **{user.display_name} has {stats['total']} invites**\n\n"
-            f"**Joins:** {stats['joins']}\n"
-            f"**Left:** {stats['left']}\n"
-            f"**Fake:** {stats.get('fake', 0)}\n"
-            f"**Rejoins:** {stats['rejoins']}"
-        ),
-        color=VISTO_STATS_COLOR
-    )
-    embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(
-        name="",
-        value="▶️ Discover new events here!",
-        inline=False
-    )
-    if requested_by is not None:
-        now = datetime.now().strftime("%H:%M")
-        embed.set_footer(
-            text=f"Requested by {requested_by.display_name} • Today at {now}"
-        )
-    return embed
-
-
-@bot.tree.command(
-    name="invites",
-    description="Show detailed invite statistics"
-)
-@app_commands.describe(
-    user="User to check"
-)
-async def invites_command(interaction: discord.Interaction, user: discord.Member = None):
-    user = user or interaction.user
-    stats = get_invite_stats(interaction.guild.id, user.id)
-    await interaction.response.send_message(
-        embed=build_invite_embed(user, stats, interaction.user)
-    )
-
+    await interaction.response.send_message(embed=build_invite_embed(user, get_invite_stats(interaction.guild.id, user.id)))
 
 @bot.command(name="i")
 async def invites_prefix(ctx, member: discord.Member = None):
+
+    print(
+        f"[DEBUG] -i executed | PID={os.getpid()} | "
+        f"guild={ctx.guild.id} | user={ctx.author.id}"
+    )
+
     member = member or ctx.author
-    stats = get_invite_stats(ctx.guild.id, member.id)
-    await ctx.send(embed=build_invite_embed(member, stats, ctx.author))
 
-
-class InvitedListView(discord.ui.View):
-    def __init__(self, guild, inviter, members):
-        super().__init__(timeout=120)
-        self.guild = guild
-        self.inviter = inviter
-        self.members = members
-        self.page = 0
-        self.per_page = 10
-        self.refresh_buttons()
-
-    @property
-    def pages(self):
-        return max(1, (len(self.members) + self.per_page - 1) // self.per_page)
-
-    def refresh_buttons(self):
-        self.first.disabled = self.page <= 0
-        self.previous.disabled = self.page <= 0
-        self.stop_button.disabled = False
-        self.next.disabled = self.page >= self.pages - 1
-        self.last.disabled = self.page >= self.pages - 1
-
-    def make_embed(self):
-        start = self.page * self.per_page
-        chunk = self.members[start:start + self.per_page]
-
-        if chunk:
-            lines = [
-                f"**#{index}** • {member.mention}"
-                for index, member in enumerate(chunk, start=start + 1)
-            ]
-            description = "\n".join(lines)
-        else:
-            description = "No currently active members were invited by this user."
-
-        embed = discord.Embed(
-            title=f"Invited list of {self.inviter.display_name}",
-            description=description,
-            color=VISTO_STATS_COLOR
+    await ctx.send(
+        embed=build_invite_embed(
+            member,
+            get_invite_stats(
+                ctx.guild.id,
+                member.id
+            )
         )
-        embed.set_footer(text=f"Page {self.page + 1}/{self.pages}")
-        return embed
-
-    async def update(self, interaction):
-        self.refresh_buttons()
-        await interaction.response.edit_message(
-            embed=self.make_embed(),
-            view=self
-        )
-
-    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
-    async def first(self, interaction, button):
-        self.page = 0
-        await self.update(interaction)
-
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
-    async def previous(self, interaction, button):
-        self.page = max(0, self.page - 1)
-        await self.update(interaction)
-
-    @discord.ui.button(label="⏹", style=discord.ButtonStyle.secondary)
-    async def stop_button(self, interaction, button):
-        self.stop()
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
-    async def next(self, interaction, button):
-        self.page = min(self.pages - 1, self.page + 1)
-        await self.update(interaction)
-
-    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
-    async def last(self, interaction, button):
-        self.page = self.pages - 1
-        await self.update(interaction)
-
+    )
+    # ============================================================
+# INVITED COMMANDS
+# ============================================================
 
 def get_invited_members(guild, inviter_id):
-    data = get_guild_data("invite_members", guild.id)
-    result = []
+    data = get_guild_data(
+        "invite_members",
+        guild.id
+    )
+
+    members = []
 
     for member_id, history in data.items():
+
         if str(history.get("inviter_id")) != str(inviter_id):
             continue
-        if history.get("last_leave"):
+
+        # Don't show members who have currently left
+        if history.get("currently_left", False):
             continue
 
-        member = guild.get_member(int(member_id))
-        if member is not None and not member.bot:
-            result.append(member)
+        member = guild.get_member(
+            int(member_id)
+        )
 
-    result.sort(key=lambda member: member.display_name.lower())
-    return result
+        if member and not member.bot:
+            members.append(member)
 
+    members.sort(
+        key=lambda member: member.display_name.lower()
+    )
+
+    return members
+
+
+# ============================================================
+# -invited
+# ============================================================
 
 @bot.command(name="invited")
 async def invited_prefix(ctx, member: discord.Member = None):
+
     member = member or ctx.author
-    invited_members = get_invited_members(ctx.guild, member.id)
-    view = InvitedListView(ctx.guild, member, invited_members)
-    await ctx.send(embed=view.make_embed(), view=view)
 
+    invited_members = get_invited_members(
+        ctx.guild,
+        member.id
+    )
 
-# ============================================================
-# LEADERBOARDS
-# ============================================================
-
-
-class LeaderboardView(discord.ui.View):
-    def __init__(self, ctx, mode):
-        super().__init__(timeout=180)
-        self.ctx = ctx
-        self.guild = ctx.guild
-        self.mode = mode
-        self.page = 0
-        self.per_page = 10
-        self.refresh_buttons()
-
-    def get_rows(self):
-        if self.mode == "dailymessage":
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            daily = get_guild_data("message_daily", self.guild.id)
-            data = daily.get(today, {})
-            return sorted(
-                [(uid, int(amount)) for uid, amount in data.items() if int(amount) > 0],
-                key=lambda item: item[1],
-                reverse=True
-            )
-
-        if self.mode == "messages":
-            data = get_guild_data("messages", self.guild.id)
-            return sorted(
-                [(uid, int(amount)) for uid, amount in data.items() if int(amount) > 0],
-                key=lambda item: item[1],
-                reverse=True
-            )
-
-        data = get_guild_data("invites", self.guild.id)
-        rows = []
-        for uid in list(data.keys()):
-            stats = get_invite_stats(self.guild.id, uid)
-            if stats["total"] > 0:
-                rows.append((uid, int(stats["total"])))
-        return sorted(rows, key=lambda item: item[1], reverse=True)
-
-    @property
-    def rows(self):
-        return self.get_rows()
-
-    @property
-    def pages(self):
-        return max(1, (len(self.rows) + self.per_page - 1) // self.per_page)
-
-    def refresh_buttons(self):
-        self.first.disabled = self.page <= 0
-        self.previous.disabled = self.page <= 0
-        self.stop_button.disabled = False
-        self.next.disabled = self.page >= self.pages - 1
-        self.last.disabled = self.page >= self.pages - 1
-
-    def make_embed(self):
-        rows = self.rows
-        start = self.page * self.per_page
-        chunk = rows[start:start + self.per_page]
-
-        if self.mode == "dailymessage":
-            title = "Daily Messages Leaderboard"
-            unit = "messages"
-            intro = "The messages are being updated in real-time!"
-        elif self.mode == "messages":
-            title = "Messages Leaderboard"
-            unit = "messages"
-            intro = "The messages are being updated in real-time!"
-        else:
-            title = "Invite Leaderboard"
-            unit = "invites"
-            intro = "The invites are being updated in real-time!"
-
-        lines = []
-        for index, (user_id, amount) in enumerate(chunk, start=start + 1):
-            member = self.guild.get_member(int(user_id))
-            mention = member.mention if member else f"<@{user_id}>"
-            lines.append(f"**#{index}** {mention} • **{amount:,}** {unit}")
-
-        if not lines:
-            lines.append("No statistics have been recorded yet.")
-
-        embed = discord.Embed(
-            title=title,
-            description=intro + "\n\n" + "\n".join(lines),
-            color=VISTO_STATS_COLOR
-        )
-        embed.set_footer(
-            text=f"Page {self.page + 1}/{self.pages} | Visto"
-        )
-        return embed
-
-    async def update(self, interaction):
-        self.refresh_buttons()
-        await interaction.response.edit_message(
-            embed=self.make_embed(),
-            view=self
-        )
-
-    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
-    async def first(self, interaction, button):
-        self.page = 0
-        await self.update(interaction)
-
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
-    async def previous(self, interaction, button):
-        self.page = max(0, self.page - 1)
-        await self.update(interaction)
-
-    @discord.ui.button(label="⏹", style=discord.ButtonStyle.secondary)
-    async def stop_button(self, interaction, button):
-        self.stop()
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
-    async def next(self, interaction, button):
-        self.page = min(self.pages - 1, self.page + 1)
-        await self.update(interaction)
-
-    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
-    async def last(self, interaction, button):
-        self.page = self.pages - 1
-        await self.update(interaction)
-
-
-@bot.command(name="lb")
-async def leaderboard_prefix_visto(ctx, mode=None):
-    mode = (mode or "dailymessage").lower()
-
-    aliases = {
-        "daily": "dailymessage",
-        "dailymessages": "dailymessage",
-        "daily-message": "dailymessage",
-        "daily-messages": "dailymessage",
-        "dailymessage": "dailymessage",
-        "message": "messages",
-        "messages": "messages",
-        "invite": "invites",
-        "invites": "invites",
-    }
-    mode = aliases.get(mode)
-
-    if mode is None:
+    if not invited_members:
         return await ctx.send(
-            embed=discord.Embed(
-                title="Visto Leaderboard",
-                description=(
-                    "Use:\n"
-                    "`-lb dailymessage`\n"
-                    "`-lb messages`\n"
-                    "`-lb invites`"
-                ),
-                color=VISTO_STATS_COLOR
-            )
-        )
-
-    view = LeaderboardView(ctx, mode)
-    await ctx.send(embed=view.make_embed(), view=view)
-
-
-# Slash leaderboards remain available as part of the existing bot.
-async def leaderboard_response(interaction, stat_type):
-    guild_data = get_guild_data(stat_type, interaction.guild.id)
-
-    if stat_type == "invites":
-        for user_id in list(guild_data.keys()):
-            get_invite_stats(interaction.guild.id, user_id)
-        sorted_users = sorted(
-            guild_data.items(),
-            key=lambda item: (
-                item[1].get("total", 0) if isinstance(item[1], dict) else item[1]
-            ),
-            reverse=True
-        )[:10]
-    else:
-        sorted_users = sorted(
-            guild_data.items(),
-            key=lambda item: item[1],
-            reverse=True
-        )[:10]
-
-    if not sorted_users:
-        return await interaction.response.send_message(
-            embed=discord.Embed(
-                title="Leaderboard",
-                description=f"There are no {stat_type} recorded yet.",
-                color=VISTO_STATS_COLOR
-            )
-        )
-
-    lines = []
-    for position, (user_id, amount) in enumerate(sorted_users, start=1):
-        member = interaction.guild.get_member(int(user_id))
-        name = member.mention if member else f"<@{user_id}>"
-        if stat_type == "invites":
-            amount = amount.get("total", 0) if isinstance(amount, dict) else amount
-        lines.append(f"**#{position}** {name} • **{amount:,}** {stat_type}")
-
-    embed = discord.Embed(
-        title=("Daily Messages Leaderboard" if stat_type == "messages" else "Invite Leaderboard"),
-        description=(
-            "The statistics are being updated in real-time!\n\n" + "\n".join(lines)
-        ),
-        color=VISTO_STATS_COLOR
-    )
-    embed.set_footer(text="Visto")
-    await interaction.response.send_message(embed=embed)
-
-
-leaderboard_group = app_commands.Group(
-    name="leaderboard",
-    description="View Visto leaderboards"
-)
-
-
-@leaderboard_group.command(name="messages", description="Message leaderboard")
-async def leaderboard_messages(interaction: discord.Interaction):
-    await leaderboard_response(interaction, "messages")
-
-
-@leaderboard_group.command(name="invites", description="Invite leaderboard")
-async def leaderboard_invites(interaction: discord.Interaction):
-    await leaderboard_response(interaction, "invites")
-
-
-bot.tree.add_command(leaderboard_group)
-
-
-@bot.command(name="leaderboard")
-async def leaderboard_prefix(ctx, stat_type=None):
-    if stat_type not in ["messages", "invites"]:
-        return await ctx.send(
-            embed=error_embed(
-                "Invalid Leaderboard",
-                "Use `.leaderboard messages` or `.leaderboard invites`."
-            )
-        )
-
-    guild_data = get_guild_data(stat_type, ctx.guild.id)
-    if stat_type == "invites":
-        for user_id in list(guild_data.keys()):
-            get_invite_stats(ctx.guild.id, user_id)
-        sorted_users = sorted(
-            guild_data.items(),
-            key=lambda item: (
-                item[1].get("total", 0) if isinstance(item[1], dict) else item[1]
-            ),
-            reverse=True
-        )[:10]
-    else:
-        sorted_users = sorted(guild_data.items(), key=lambda item: item[1], reverse=True)[:10]
-
-    lines = []
-    for position, (user_id, amount) in enumerate(sorted_users, start=1):
-        if stat_type == "invites":
-            amount = amount.get("total", 0) if isinstance(amount, dict) else amount
-        lines.append(f"**#{position}** <@{user_id}> • **{amount:,}** {stat_type}")
-
-    await ctx.send(
-        embed=discord.Embed(
-            title=f"{stat_type.title()} Leaderboard",
-            description="\n".join(lines) if lines else "No data recorded yet.",
-            color=VISTO_STATS_COLOR
-        )
-    )
-
-
-# ============================================================
-# ADD / REMOVE / RESET
-# ============================================================
-
-stats_group = app_commands.Group(
-    name="stats",
-    description="Manage message and invite statistics"
-)
-
-
-@stats_group.command(
-    name="add",
-    description="Add messages or invites"
-)
-@app_commands.describe(
-    type="messages or invites",
-    user="User",
-    amount="Amount"
-)
-@app_commands.choices(
-    type=[
-        app_commands.Choice(
-            name="Messages",
-            value="messages"
-        ),
-        app_commands.Choice(
-            name="Invites",
-            value="invites"
-        )
-    ]
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def stats_add(
-    interaction,
-    type: app_commands.Choice[str],
-    user: discord.Member,
-    amount: int
-):
-
-    if amount < 1:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Amount",
-                "Amount must be at least 1."
-            ),
-            ephemeral=True
-        )
-
-    category = get_guild_data(
-        type.value,
-        interaction.guild.id
-    )
-
-    uid = str(user.id)
-
-    if type.value == "invites":
-        stats = get_invite_stats(
-            interaction.guild.id,
-            user.id
-        )
-        stats["joins"] += amount
-        stats["total"] = max(
-            0,
-            stats["joins"] - stats["left"]
-        )
-    else:
-        category[uid] = (
-            category.get(uid, 0)
-            + amount
-        )
-
-    save_database()
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Statistics Updated",
-            (
-                f"Added **{amount:,} {type.value}** "
-                f"to {user.mention}."
-            )
-        )
-    )
-
-
-@stats_group.command(
-    name="remove",
-    description="Remove messages or invites"
-)
-@app_commands.describe(
-    type="messages or invites",
-    user="User",
-    amount="Amount"
-)
-@app_commands.choices(
-    type=[
-        app_commands.Choice(
-            name="Messages",
-            value="messages"
-        ),
-        app_commands.Choice(
-            name="Invites",
-            value="invites"
-        )
-    ]
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def stats_remove(
-    interaction,
-    type: app_commands.Choice[str],
-    user: discord.Member,
-    amount: int
-):
-
-    if amount < 1:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Amount",
-                "Amount must be at least 1."
-            ),
-            ephemeral=True
-        )
-
-    category = get_guild_data(
-        type.value,
-        interaction.guild.id
-    )
-
-    uid = str(user.id)
-
-    if type.value == "invites":
-        stats = get_invite_stats(
-            interaction.guild.id,
-            user.id
-        )
-        stats["joins"] = max(
-            0,
-            stats["joins"] - amount
-        )
-        stats["total"] = max(
-            0,
-            stats["joins"] - stats["left"]
-        )
-    else:
-        category[uid] = max(
-            0,
-            category.get(uid, 0) - amount
-        )
-
-    save_database()
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Statistics Updated",
-            (
-                f"Removed **{amount:,} {type.value}** "
-                f"from {user.mention}."
-            )
-        )
-    )
-
-
-@stats_group.command(
-    name="reset",
-    description="Reset messages or invites"
-)
-@app_commands.describe(
-    type="messages or invites",
-    user="User"
-)
-@app_commands.choices(
-    type=[
-        app_commands.Choice(
-            name="Messages",
-            value="messages"
-        ),
-        app_commands.Choice(
-            name="Invites",
-            value="invites"
-        )
-    ]
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def stats_reset(
-    interaction,
-    type: app_commands.Choice[str],
-    user: discord.Member
-):
-
-    category = get_guild_data(
-        type.value,
-        interaction.guild.id
-    )
-
-    if type.value == "invites":
-        stats = get_invite_stats(
-            interaction.guild.id,
-            user.id
-        )
-        stats["joins"] = 0
-        stats["left"] = 0
-        stats["rejoins"] = 0
-        stats["total"] = 0
-    else:
-        category[str(user.id)] = 0
-
-    save_database()
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Statistics Reset",
-            f"Reset {type.value} for {user.mention}."
-        )
-    )
-
-
-@stats_group.command(
-    name="fake",
-    description="Add or remove fake invite count"
-)
-@app_commands.describe(
-    user="Inviter",
-    amount="Amount to add to Fake"
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def stats_fake(interaction, user: discord.Member, amount: int):
-    if amount < 1:
-        return await interaction.response.send_message(embed=error_embed("Invalid Amount", "Amount must be at least 1."), ephemeral=True)
-    stats = get_invite_stats(interaction.guild.id, user.id)
-    stats["fake"] += amount
-    save_database()
-    await interaction.response.send_message(embed=success_embed("Fake Invites Updated", f"Added **{amount}** fake invite(s) to {user.mention}."))
-
-
-bot.tree.add_command(
-    stats_group
-)
-
-
-# ============================================================
-# PREFIX STATS
-# ============================================================
-
-@bot.command(name="add")
-@commands.has_guild_permissions(
-    manage_guild=True
-)
-async def prefix_add(
-    ctx,
-    stat_type=None,
-    member: discord.Member = None,
-    amount: int = None
-):
-
-    if (
-        stat_type not in [
-            "messages",
-            "invites"
-        ]
-        or member is None
-        or amount is None
-        or amount < 1
-    ):
-
-        return await ctx.send(
-            embed=error_embed(
-                "Usage",
-                "`.add messages @user 100`"
-            )
-        )
-
-    category = get_guild_data(
-        stat_type,
-        ctx.guild.id
-    )
-
-    uid = str(member.id)
-
-    if stat_type == "invites":
-        stats = get_invite_stats(
-            ctx.guild.id,
-            member.id
-        )
-        stats["joins"] += amount
-        stats["total"] = max(
-            0,
-            stats["joins"] - stats["left"]
-        )
-    else:
-        category[uid] = (
-            category.get(uid, 0)
-            + amount
-        )
-
-    save_database()
-
-    await ctx.send(
-        embed=success_embed(
-            "Statistics Updated",
-            (
-                f"Added **{amount:,} {stat_type}** "
-                f"to {member.mention}."
-            )
-        )
-    )
-
-
-@bot.command(name="remove")
-@commands.has_guild_permissions(
-    manage_guild=True
-)
-async def prefix_remove(
-    ctx,
-    stat_type=None,
-    member: discord.Member = None,
-    amount: int = None
-):
-
-    if (
-        stat_type not in [
-            "messages",
-            "invites"
-        ]
-        or member is None
-        or amount is None
-        or amount < 1
-    ):
-
-        return await ctx.send(
-            embed=error_embed(
-                "Usage",
-                "`.remove messages @user 100`"
-            )
-        )
-
-    category = get_guild_data(
-        stat_type,
-        ctx.guild.id
-    )
-
-    uid = str(member.id)
-
-    if stat_type == "invites":
-        stats = get_invite_stats(
-            ctx.guild.id,
-            member.id
-        )
-        stats["joins"] = max(
-            0,
-            stats["joins"] - amount
-        )
-        stats["total"] = max(
-            0,
-            stats["joins"] - stats["left"]
-        )
-    else:
-        category[uid] = max(
-            0,
-            category.get(uid, 0) - amount
-        )
-
-    save_database()
-
-    await ctx.send(
-        embed=success_embed(
-            "Statistics Updated",
-            (
-                f"Removed **{amount:,} {stat_type}** "
-                f"from {member.mention}."
-            )
-        )
-    )
-
-
-@bot.command(name="reset")
-@commands.has_guild_permissions(
-    manage_guild=True
-)
-async def prefix_reset(
-    ctx,
-    stat_type=None,
-    member: discord.Member = None
-):
-
-    if (
-        stat_type not in [
-            "messages",
-            "invites"
-        ]
-        or member is None
-    ):
-
-        return await ctx.send(
-            embed=error_embed(
-                "Usage",
-                "`.reset messages @user`"
-            )
-        )
-
-    category = get_guild_data(
-        stat_type,
-        ctx.guild.id
-    )
-
-    if stat_type == "invites":
-        stats = get_invite_stats(
-            ctx.guild.id,
-            member.id
-        )
-        stats["joins"] = 0
-        stats["left"] = 0
-        stats["rejoins"] = 0
-        stats["total"] = 0
-    else:
-        category[str(member.id)] = 0
-
-    save_database()
-
-    await ctx.send(
-        embed=success_embed(
-            "Statistics Reset",
-            f"Reset {stat_type} for {member.mention}."
-        )
-    )
-
-
-# ============================================================
-# SETLOG
-# ============================================================
-
-@bot.tree.command(
-    name="setlog",
-    description="Set the Visto logging channel"
-)
-@app_commands.describe(
-    channel="Logging channel"
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def setlog(
-    interaction,
-    channel: discord.TextChannel
-):
-
-    settings = get_guild_data(
-        "settings",
-        interaction.guild.id
-    )
-
-    settings["log_channel"] = channel.id
-
-    save_database()
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Logging Channel Updated",
-            (
-                f"Visto logs will now be sent to "
-                f"{channel.mention}."
-            )
-        )
-    )
-
-
-# ============================================================
-# BAN
-# ============================================================
-
-@bot.tree.command(
-    name="ban",
-    description="Ban a member"
-)
-@app_commands.describe(
-    user="Member",
-    reason="Reason"
-)
-@app_commands.checks.has_permissions(
-    ban_members=True
-)
-async def ban(
-    interaction,
-    user: discord.Member,
-    reason: str = "No reason provided"
-):
-
-    try:
-
-        await user.ban(
-            reason=reason
-        )
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Member Banned",
-                (
-                    f"**Member:** {user.mention}\n"
-                    f"**Reason:** {reason}"
-                )
-            )
-        )
-
-        await send_log(
-            interaction.guild,
-            "🔨 Member Banned",
-            (
-                f"**Member:** {user.mention}\n"
-                f"**Moderator:** {interaction.user.mention}\n"
-                f"**Reason:** {reason}"
-            ),
-            discord.Color.red()
-        )
-
-    except discord.Forbidden:
-
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Ban Failed",
-                "I don't have permission to ban this member."
-            ),
-            ephemeral=True
-        )
-
-
-# ============================================================
-# UNBAN
-# ============================================================
-
-@bot.tree.command(
-    name="unban",
-    description="Unban a user"
-)
-@app_commands.describe(
-    user_id="User ID of the banned user",
-    reason="Reason"
-)
-@app_commands.checks.has_permissions(
-    ban_members=True
-)
-async def unban(
-    interaction,
-    user_id: str,
-    reason: str = "No reason provided"
-):
-    try:
-        target_id = int(user_id)
-    except ValueError:
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid User ID",
-                "Please provide a valid Discord user ID."
-            ),
-            ephemeral=True
-        )
-
-    try:
-        user = await bot.fetch_user(target_id)
-
-        await interaction.guild.unban(
-            user,
-            reason=reason
-        )
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Member Unbanned",
-                (
-                    f"**User:** {user.mention}\n"
-                    f"**Reason:** {reason}"
-                )
-            )
-        )
-
-        await send_log(
-            interaction.guild,
-            "🔓 Member Unbanned",
-            (
-                f"**User:** {user.mention}\n"
-                f"**Moderator:** {interaction.user.mention}\n"
-                f"**Reason:** {reason}"
-            ),
-            discord.Color.green()
-        )
-
-    except discord.NotFound:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "User Not Banned",
-                "That user is not currently banned from this server."
-            ),
-            ephemeral=True
-        )
-
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Unban Failed",
-                "I don't have permission to unban this user."
-            ),
-            ephemeral=True
-        )
-
-    except discord.HTTPException as error:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Unban Failed",
-                f"Discord rejected the unban request: `{error}`"
-            ),
-            ephemeral=True
-        )
-
-
-# ============================================================
-# KICK
-# ============================================================
-
-@bot.tree.command(
-    name="kick",
-    description="Kick a member"
-)
-@app_commands.describe(
-    user="Member",
-    reason="Reason"
-)
-@app_commands.checks.has_permissions(
-    kick_members=True
-)
-async def kick(
-    interaction,
-    user: discord.Member,
-    reason: str = "No reason provided"
-):
-
-    try:
-
-        await user.kick(
-            reason=reason
-        )
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Member Kicked",
-                (
-                    f"**Member:** {user.mention}\n"
-                    f"**Reason:** {reason}"
-                )
-            )
-        )
-
-        await send_log(
-            interaction.guild,
-            "👢 Member Kicked",
-            (
-                f"**Member:** {user.mention}\n"
-                f"**Moderator:** {interaction.user.mention}\n"
-                f"**Reason:** {reason}"
-            ),
-            discord.Color.orange()
-        )
-
-    except discord.Forbidden:
-
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Kick Failed",
-                "I don't have permission to kick this member."
-            ),
-            ephemeral=True
-        )
-
-
-# ============================================================
-# TIMEOUT
-# ============================================================
-
-@bot.tree.command(
-    name="timeout",
-    description="Timeout a member"
-)
-@app_commands.describe(
-    user="Member",
-    duration="Duration such as 10m, 2h, 1d",
-    reason="Reason"
-)
-@app_commands.checks.has_permissions(
-    moderate_members=True
-)
-async def timeout(
-    interaction,
-    user: discord.Member,
-    duration: str,
-    reason: str = "No reason provided"
-):
-
-    seconds = parse_duration(
-        duration
-    )
-
-    if seconds is None:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Duration",
-                (
-                    "Use formats like:\n"
-                    "`10s` • `5m` • `2h` • `3d` • `2mo` • `1y`"
-                )
-            ),
-            ephemeral=True
-        )
-
-    if seconds < 1 or seconds > 28 * 24 * 60 * 60:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Duration",
-                "Discord timeouts cannot exceed 28 days."
-            ),
-            ephemeral=True
-        )
-
-    try:
-
-        await user.timeout(
-            timedelta(
-                seconds=seconds
-            ),
-            reason=reason
-        )
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Member Timed Out",
-                (
-                    f"**Member:** {user.mention}\n"
-                    f"**Duration:** `{duration}`\n"
-                    f"**Reason:** {reason}"
-                )
-            )
-        )
-
-        await send_log(
-            interaction.guild,
-            "⏱️ Member Timed Out",
-            (
-                f"**Member:** {user.mention}\n"
-                f"**Moderator:** {interaction.user.mention}\n"
-                f"**Duration:** `{duration}`\n"
-                f"**Reason:** {reason}"
-            ),
-            discord.Color.orange()
-        )
-
-    except discord.Forbidden:
-
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Timeout Failed",
-                "I don't have permission to timeout this member."
-            ),
-            ephemeral=True
-        )
-
-
-# ============================================================
-# WARN
-# ============================================================
-
-@bot.tree.command(
-    name="warn",
-    description="Warn a member"
-)
-@app_commands.describe(
-    user="Member",
-    reason="Reason"
-)
-@app_commands.checks.has_permissions(
-    moderate_members=True
-)
-async def warn(
-    interaction,
-    user: discord.Member,
-    reason: str
-):
-
-    warnings_data = get_guild_data(
-        "warnings",
-        interaction.guild.id
-    )
-
-    uid = str(user.id)
-
-    if uid not in warnings_data:
-        warnings_data[uid] = []
-
-    warnings_data[uid].append({
-        "reason": reason,
-        "moderator": interaction.user.id,
-        "timestamp": int(
-            datetime.now(
-                timezone.utc
-            ).timestamp()
-        )
-    })
-
-    save_database()
-
-    embed = warning_embed(
-        "Member Warned",
-        (
-            f"**Member:** {user.mention}\n"
-            f"**Reason:** {reason}\n"
-            f"**Moderator:** {interaction.user.mention}"
-        )
-    )
-
-    await interaction.response.send_message(
-        embed=embed
-    )
-
-    dm_embed = discord.Embed(
-        title="⚠️ You Have Been Warned",
-        description=(
-            f"You have received a warning in "
-            f"**{interaction.guild.name}**."
-        ),
-        color=discord.Color.orange(),
-        timestamp=datetime.now(timezone.utc)
-    )
-
-    dm_embed.add_field(
-        name="Reason",
-        value=reason,
-        inline=False
-    )
-
-    dm_embed.add_field(
-        name="Moderator",
-        value=interaction.user.mention,
-        inline=True
-    )
-
-    dm_embed.set_footer(
-        text="Visto Moderation"
-    )
-
-    try:
-
-        await user.send(
-            embed=dm_embed
-        )
-
-    except discord.Forbidden:
-
-        pass
-
-    await send_log(
-        interaction.guild,
-        "⚠️ Member Warned",
-        (
-            f"**Member:** {user.mention}\n"
-            f"**Moderator:** {interaction.user.mention}\n"
-            f"**Reason:** {reason}"
-        ),
-        discord.Color.orange()
-    )
-
-
-# ============================================================
-# WARNINGS
-# ============================================================
-
-@bot.tree.command(
-    name="warnings",
-    description="View a member's warnings"
-)
-@app_commands.describe(
-    user="Member"
-)
-@app_commands.checks.has_permissions(
-    moderate_members=True
-)
-async def warnings(
-    interaction,
-    user: discord.Member
-):
-
-    warnings_data = get_guild_data(
-        "warnings",
-        interaction.guild.id
-    )
-
-    warning_list = warnings_data.get(
-        str(user.id),
-        []
-    )
-
-    if not warning_list:
-
-        return await interaction.response.send_message(
             embed=info_embed(
-                "Warnings",
-                f"{user.mention} has no warnings."
+                "Invited Members",
+                f"{member.mention} has not invited any currently active members."
             )
         )
 
     lines = []
 
-    for number, warning in enumerate(
-        warning_list,
+    for number, invited in enumerate(
+        invited_members,
         start=1
     ):
-
         lines.append(
-            f"**{number}.** {warning['reason']}"
+            f"**#{number}** {invited.mention}"
         )
 
-    embed = warning_embed(
-        f"Warnings — {user.display_name}",
-        "\n".join(lines)
+    embed = discord.Embed(
+        title=f"📨 Members Invited by {member.display_name}",
+        description="\n".join(lines[:50]),
+        color=VISTO_COLOR
+    )
+
+    embed.set_footer(
+        text=f"Total: {len(invited_members)} • Visto Bot"
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+# ============================================================
+# /invited
+# ============================================================
+
+@bot.tree.command(
+    name="invited",
+    description="Show the members invited by a user"
+)
+@app_commands.describe(
+    user="User whose invited members you want to see"
+)
+async def invited_slash(
+    interaction: discord.Interaction,
+    user: discord.Member = None
+):
+
+    user = user or interaction.user
+
+    invited_members = get_invited_members(
+        interaction.guild,
+        user.id
+    )
+
+    if not invited_members:
+        return await interaction.response.send_message(
+            embed=info_embed(
+                "Invited Members",
+                f"{user.mention} has not invited any currently active members."
+            )
+        )
+
+    lines = []
+
+    for number, invited in enumerate(
+        invited_members,
+        start=1
+    ):
+        lines.append(
+            f"**#{number}** {invited.mention}"
+        )
+
+    embed = discord.Embed(
+        title=f"📨 Members Invited by {user.display_name}",
+        description="\n".join(lines[:50]),
+        color=VISTO_COLOR
+    )
+
+    embed.set_footer(
+        text=f"Total: {len(invited_members)} • Visto Bot"
     )
 
     await interaction.response.send_message(
@@ -2550,284 +996,305 @@ async def warnings(
 
 
 # ============================================================
-# PURGE
+# MODERATION + DMs
 # ============================================================
 
-@bot.tree.command(
-    name="purge",
-    description="Delete messages"
-)
-@app_commands.describe(
-    amount="Number of messages"
-)
-@app_commands.checks.has_permissions(
-    manage_messages=True
-)
-async def purge(
-    interaction,
-    amount: int
-):
+@bot.tree.command(name="ban", description="Ban a member")
+@app_commands.describe(user="Member", reason="Reason")
+@app_commands.checks.has_permissions(ban_members=True)
+async def ban(interaction, user: discord.Member, reason: str = "No reason provided"):
+    dm = discord.Embed(title=f"{premium_emoji(interaction.guild, 'ban')} You were banned", description=f'You were banned from **{interaction.guild.name}** for "{reason}".', color=discord.Color.red())
+    await safe_dm(user, dm)
+    try:
+        await user.ban(reason=reason)
+        await interaction.response.send_message(embed=success_embed("Member Banned", f"**Member:** {user.mention}\n**Reason:** {reason}"))
+        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ban')} Member Banned", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.red())
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=error_embed("Ban Failed", "I don't have permission to ban that member."), ephemeral=True)
 
+
+@bot.tree.command(name="unban", description="Unban a user")
+@app_commands.describe(user_id="User ID", reason="Reason")
+@app_commands.checks.has_permissions(ban_members=True)
+async def unban(interaction, user_id: str, reason: str = "No reason provided"):
+    try:
+        target = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(target, reason=reason)
+        await safe_dm(target, discord.Embed(title="🔓 You were unbanned", description=f'You were unbanned from **{interaction.guild.name}** for "{reason}".', color=discord.Color.green()))
+        await interaction.response.send_message(embed=success_embed("Member Unbanned", f"**User:** {target.mention}\n**Reason:** {reason}"))
+    except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+        await interaction.response.send_message(embed=error_embed("Unban Failed", f"Could not unban that user. `{error}`"), ephemeral=True)
+
+
+@bot.tree.command(name="kick", description="Kick a member")
+@app_commands.describe(user="Member", reason="Reason")
+@app_commands.checks.has_permissions(kick_members=True)
+async def kick(interaction, user: discord.Member, reason: str = "No reason provided"):
+    await safe_dm(user, discord.Embed(title="👢 You were kicked", description=f'You were kicked from **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
+    try:
+        await user.kick(reason=reason)
+        await interaction.response.send_message(embed=success_embed("Member Kicked", f"**Member:** {user.mention}\n**Reason:** {reason}"))
+        await send_log(interaction.guild, "👢 Member Kicked", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=error_embed("Kick Failed", "I don't have permission."), ephemeral=True)
+
+
+@bot.tree.command(name="timeout", description="Timeout a member")
+@app_commands.describe(user="Member", duration="10m, 2h, 1d", reason="Reason")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def timeout(interaction, user: discord.Member, duration: str, reason: str = "No reason provided"):
+    seconds = duration_parser(duration)
+    if seconds is None or seconds < 1 or seconds > 28 * 86400:
+        return await interaction.response.send_message(embed=error_embed("Invalid Duration", "Use `10m`, `2h`, `1d`, etc. Maximum is 28 days."), ephemeral=True)
+    await safe_dm(user, discord.Embed(title="⏱️ You were timed out", description=f'You were timed out in **{interaction.guild.name}** for **{duration}** for "{reason}".', color=discord.Color.orange()))
+    try:
+        await user.timeout(timedelta(seconds=seconds), reason=reason)
+        await interaction.response.send_message(embed=success_embed("Member Timed Out", f"**Member:** {user.mention}\n**Duration:** `{duration}`\n**Reason:** {reason}"))
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=error_embed("Timeout Failed", "I don't have permission."), ephemeral=True)
+
+
+@bot.tree.command(name="warn", description="Warn a member")
+@app_commands.describe(user="Member", reason="Reason")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warn(interaction, user: discord.Member, reason: str):
+    warnings = get_guild_data("warnings", interaction.guild.id)
+    uid = str(user.id)
+    warnings.setdefault(uid, []).append({
+        "reason": reason,
+        "moderator": interaction.user.id,
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+    })
+    save_database()
+    await safe_dm(user, discord.Embed(title=f"{premium_emoji(interaction.guild, 'warn')} You were warned", description=f'You were warned in **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
+    await interaction.response.send_message(embed=warning_embed("Member Warned", f"**Member:** {user.mention}\n**Reason:** {reason}"))
+    await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'warn')} Member Warned", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+
+
+@bot.tree.command(name="warnings", description="View warnings")
+@app_commands.describe(user="Member")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warnings(interaction, user: discord.Member):
+    items = get_guild_data("warnings", interaction.guild.id).get(str(user.id), [])
+    if not items:
+        return await interaction.response.send_message(embed=info_embed("Warnings", f"{user.mention} has no warnings."))
+    lines = [f"**{i}.** {x['reason']} — <@{x['moderator']}>" for i, x in enumerate(items, 1)]
+    await interaction.response.send_message(embed=warning_embed(f"Warnings — {user.display_name}", "\n".join(lines[:25])))
+
+
+@bot.tree.command(name="delwarn", description="Delete a specific warning")
+@app_commands.describe(user="Member", number="Warning number, starting at 1")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def delwarn(interaction, user: discord.Member, number: int):
+    warnings = get_guild_data("warnings", interaction.guild.id)
+    items = warnings.get(str(user.id), [])
+    if number < 1 or number > len(items):
+        return await interaction.response.send_message(embed=error_embed("Invalid Warning", "That warning number does not exist."), ephemeral=True)
+    removed = items.pop(number - 1)
+    if items:
+        warnings[str(user.id)] = items
+    else:
+        warnings.pop(str(user.id), None)
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Warning Deleted", f"Deleted warning **#{number}** from {user.mention}.\n**Reason:** {removed['reason']}"))
+
+
+@bot.command(name="delwarn")
+@commands.has_permissions(moderate_members=True)
+async def delwarn_prefix(ctx, user: discord.Member = None, number: int = None):
+    if user is None or number is None:
+        return await ctx.send(embed=info_embed("Usage", "Use `.delwarn @user <warning number>`"))
+
+    warnings = get_guild_data("warnings", ctx.guild.id)
+    items = warnings.get(str(user.id), [])
+
+    if number < 1 or number > len(items):
+        return await ctx.send(embed=error_embed("Invalid Warning", "That warning number does not exist."))
+
+    removed = items.pop(number - 1)
+    if items:
+        warnings[str(user.id)] = items
+    else:
+        warnings.pop(str(user.id), None)
+
+    save_database()
+
+    await ctx.send(
+        embed=success_embed(
+            "Warning Deleted",
+            f"Deleted warning **#{number}** from {user.mention}.\n**Reason:** {removed['reason']}"
+        )
+    )
+
+
+@bot.tree.command(name="purge", description="Delete messages")
+@app_commands.describe(amount="1-100")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def purge(interaction, amount: int):
     if amount < 1 or amount > 100:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Amount",
-                "Choose between 1 and 100 messages."
-            ),
-            ephemeral=True
-        )
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    deleted = await interaction.channel.purge(
-        limit=amount
-    )
-
-    await interaction.followup.send(
-        embed=success_embed(
-            "Messages Purged",
-            f"Deleted **{len(deleted)} messages**."
-        ),
-        ephemeral=True
-    )
-
-    await send_log(
-        interaction.guild,
-        "🧹 Messages Purged",
-        (
-            f"**Moderator:** {interaction.user.mention}\n"
-            f"**Channel:** {interaction.channel.mention}\n"
-            f"**Amount:** {len(deleted)}"
-        ),
-        discord.Color.orange()
-    )
+        return await interaction.response.send_message(embed=error_embed("Invalid Amount", "Choose 1-100."), ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(embed=success_embed("Messages Purged", f"Deleted **{len(deleted)}** messages."), ephemeral=True)
 
 
-# ============================================================
-# LOCK
-# ============================================================
-
-@bot.tree.command(
-    name="lock",
-    description="Lock the current channel"
-)
-@app_commands.checks.has_permissions(
-    manage_channels=True
-)
-async def lock(
-    interaction
-):
-
-    overwrite = interaction.channel.overwrites_for(
-        interaction.guild.default_role
-    )
-
+@bot.tree.command(name="lock", description="Lock current channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def lock(interaction):
+    overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
     overwrite.send_messages = False
-
-    await interaction.channel.set_permissions(
-        interaction.guild.default_role,
-        overwrite=overwrite
-    )
-
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Channel Locked",
-            f"{interaction.channel.mention} has been locked."
-        )
-    )
-
-    await send_log(
-        interaction.guild,
-        "🔒 Channel Locked",
-        (
-            f"**Channel:** {interaction.channel.mention}\n"
-            f"**Moderator:** {interaction.user.mention}"
-        ),
-        discord.Color.orange()
-    )
+    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
+    await interaction.response.send_message(embed=success_embed("Channel Locked", f"{interaction.channel.mention} is locked."))
 
 
-# ============================================================
-# UNLOCK
-# ============================================================
-
-@bot.tree.command(
-    name="unlock",
-    description="Unlock the current channel"
-)
-@app_commands.checks.has_permissions(
-    manage_channels=True
-)
-async def unlock(
-    interaction
-):
-
-    overwrite = interaction.channel.overwrites_for(
-        interaction.guild.default_role
-    )
-
+@bot.tree.command(name="unlock", description="Unlock current channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unlock(interaction):
+    overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
     overwrite.send_messages = None
+    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
+    await interaction.response.send_message(embed=success_embed("Channel Unlocked", f"{interaction.channel.mention} is unlocked."))
 
-    await interaction.channel.set_permissions(
-        interaction.guild.default_role,
-        overwrite=overwrite
-    )
 
+@bot.tree.command(name="lockdown", description="Lock all text channels")
+@app_commands.checks.has_permissions(administrator=True)
+async def lockdown(interaction):
+    await interaction.response.defer()
+    changed = 0
+    for channel in interaction.guild.text_channels:
+        try:
+            overwrite = channel.overwrites_for(interaction.guild.default_role)
+            overwrite.send_messages = False
+            await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
+            changed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    await interaction.followup.send(embed=success_embed("Server Lockdown Enabled", f"Locked **{changed}** text channels."))
+
+
+@bot.tree.command(name="unlockdown", description="Unlock all text channels")
+@app_commands.checks.has_permissions(administrator=True)
+async def unlockdown(interaction):
+    await interaction.response.defer()
+    changed = 0
+    for channel in interaction.guild.text_channels:
+        try:
+            overwrite = channel.overwrites_for(interaction.guild.default_role)
+            overwrite.send_messages = None
+            await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
+            changed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    await interaction.followup.send(embed=success_embed("Server Lockdown Disabled", f"Unlocked **{changed}** text channels."))
+
+
+# ============================================================
+# /RENAME
+# ============================================================
+
+@bot.tree.command(name="rename", description="Rename the current channel")
+@app_commands.describe(name="New channel name")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def rename_channel(interaction: discord.Interaction, name: str):
+    name = name.strip()
+
+    if not name:
+        return await interaction.response.send_message(
+            embed=error_embed("Invalid Name", "Please provide a channel name."),
+            ephemeral=True,
+        )
+
+    if len(name) > 100:
+        return await interaction.response.send_message(
+            embed=error_embed("Name Too Long", "Channel names can be at most 100 characters."),
+            ephemeral=True,
+        )
+
+    old_name = interaction.channel.name
+
+    try:
+        await interaction.channel.edit(
+            name=name,
+            reason=f"Channel renamed by {interaction.user}",
+        )
+    except discord.Forbidden:
+        return await interaction.response.send_message(
+            embed=error_embed("Rename Failed", "I don't have permission to rename this channel."),
+            ephemeral=True,
+        )
+    except discord.HTTPException as error:
+        return await interaction.response.send_message(
+            embed=error_embed("Rename Failed", f"Discord rejected the rename: `{error}`"),
+            ephemeral=True,
+        )
+
+    arrow = premium_emoji(interaction.guild, "arrow")
     await interaction.response.send_message(
         embed=success_embed(
-            "Channel Unlocked",
-            f"{interaction.channel.mention} has been unlocked."
+            "Channel Renamed",
+            f"{arrow} **Before:** `#{old_name}`\n{arrow} **After:** {interaction.channel.mention}",
         )
     )
 
     await send_log(
         interaction.guild,
-        "🔓 Channel Unlocked",
-        (
-            f"**Channel:** {interaction.channel.mention}\n"
-            f"**Moderator:** {interaction.user.mention}"
-        ),
-        discord.Color.green()
+        f"{premium_emoji(interaction.guild, 'mod')} Channel Renamed",
+        f"{arrow} **Before:** `#{old_name}`\n{arrow} **After:** `#{name}`\n{arrow} **By:** {interaction.user.mention}",
+        discord.Color.blurple(),
     )
 
 
 # ============================================================
-# LOCKDOWN
+# SAY
 # ============================================================
 
-@bot.tree.command(
-    name="lockdown",
-    description="Lock every text channel in the server"
-)
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def lockdown(
-    interaction
-):
-
-    await interaction.response.defer()
-
-    changed = 0
-
-    for channel in interaction.guild.text_channels:
-
-        try:
-
-            overwrite = channel.overwrites_for(
-                interaction.guild.default_role
-            )
-
-            overwrite.send_messages = False
-
-            await channel.set_permissions(
-                interaction.guild.default_role,
-                overwrite=overwrite,
-                reason=(
-                    f"Server lockdown by "
-                    f"{interaction.user}"
-                )
-            )
-
-            changed += 1
-
-        except (
-            discord.Forbidden,
-            discord.HTTPException
-        ):
-
-            continue
-
-    await interaction.followup.send(
-        embed=success_embed(
-            "Server Lockdown Enabled",
-            (
-                f"🔒 Locked **{changed} text channels**.\n\n"
-                "Members cannot send messages until the "
-                "channels are unlocked."
-            )
-        )
-    )
-
-    await send_log(
-        interaction.guild,
-        "🚨 Server Lockdown Enabled",
-        (
-            f"**Moderator:** {interaction.user.mention}\n"
-            f"**Channels locked:** {changed}"
-        ),
-        discord.Color.red()
-    )
+@bot.command(name="say")
+@commands.has_permissions(manage_messages=True)
+async def say(ctx, *, message=None):
+    if not message:
+        return await ctx.send("Usage: `.say <message>`", delete_after=5)
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    await ctx.send(f"{message}")
 
 
 # ============================================================
-# UNLOCKDOWN
+# AUTORESPONDER
 # ============================================================
 
-@bot.tree.command(
-    name="unlockdown",
-    description="Unlock every text channel in the server"
-)
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def unlockdown(
-    interaction
-):
+@bot.tree.command(name="autoresponder_add", description="Add an autoresponder")
+@app_commands.describe(trigger="Exact trigger text", response="Bot response")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_add(interaction, trigger: str, response: str):
+    data = get_guild_data("autoresponders", interaction.guild.id)
+    data[trigger.strip().lower()] = response
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Autoresponder Added", f"`{trigger}` → {response}"), ephemeral=True)
 
-    await interaction.response.defer()
 
-    changed = 0
+@bot.tree.command(name="autoresponder_remove", description="Remove an autoresponder")
+@app_commands.describe(trigger="Exact trigger text")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_remove(interaction, trigger: str):
+    data = get_guild_data("autoresponders", interaction.guild.id)
+    trigger = trigger.strip().lower()
+    if trigger not in data:
+        return await interaction.response.send_message(embed=error_embed("Not Found", f"No autoresponder exists for `{trigger}`."), ephemeral=True)
+    del data[trigger]
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Autoresponder Removed", f"Removed `{trigger}`."), ephemeral=True)
 
-    for channel in interaction.guild.text_channels:
 
-        try:
-
-            overwrite = channel.overwrites_for(
-                interaction.guild.default_role
-            )
-
-            overwrite.send_messages = None
-
-            await channel.set_permissions(
-                interaction.guild.default_role,
-                overwrite=overwrite,
-                reason=(
-                    f"Server lockdown removed by "
-                    f"{interaction.user}"
-                )
-            )
-
-            changed += 1
-
-        except (
-            discord.Forbidden,
-            discord.HTTPException
-        ):
-
-            continue
-
-    await interaction.followup.send(
-        embed=success_embed(
-            "Server Lockdown Disabled",
-            (
-                f"🔓 Unlocked **{changed} text channels**."
-            )
-        )
-    )
-
-    await send_log(
-        interaction.guild,
-        "🔓 Server Lockdown Disabled",
-        (
-            f"**Moderator:** {interaction.user.mention}\n"
-            f"**Channels unlocked:** {changed}"
-        ),
-        discord.Color.green()
-    )
+@bot.tree.command(name="autoresponder_list", description="List autoresponders")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_list(interaction):
+    data = get_guild_data("autoresponders", interaction.guild.id)
+    if not data:
+        return await interaction.response.send_message(embed=info_embed("Autoresponders", "None configured."), ephemeral=True)
+    lines = [f"**{i}.** `{k}` → {v[:150]}" for i, (k, v) in enumerate(data.items(), 1)]
+    await interaction.response.send_message(embed=info_embed("Autoresponders", "\n".join(lines[:25])))
 
 
 # ============================================================
@@ -2836,206 +1303,212 @@ async def unlockdown(
 
 def ticket_settings(guild):
     settings = get_guild_data("settings", guild.id)
-    settings.setdefault("ticket_categories", {})
-    settings["ticket_categories"].setdefault("buy", None)
-    settings["ticket_categories"].setdefault("claim", None)
-    settings["ticket_categories"].setdefault("support", None)
-    settings.setdefault("ticket_staff_role", None)
-    return settings
+    return {
+        "buy": int(settings.get("ticket_buy_category", BUY_CATEGORY_ID)),
+        "claim": int(settings.get("ticket_claim_category", CLAIM_CATEGORY_ID)),
+        "support": int(settings.get("ticket_support_category", SUPPORT_CATEGORY_ID)),
+        "staff_role": int(settings.get("ticket_staff_role", TICKET_STAFF_ROLE_ID)),
+    }
 
 
 def is_ticket_channel(channel):
-    return bool(channel and channel.topic and "Ticket Owner:" in channel.topic)
+    return isinstance(channel, discord.TextChannel) and channel.topic and channel.topic.startswith("VISTO_TICKET|")
 
 
 def ticket_owner_id(channel):
-    if not is_ticket_channel(channel):
+    try:
+        parts = channel.topic.split("|")
+        return int(parts[1])
+    except Exception:
         return None
-    match = re.search(r"Ticket Owner:\s*(\d+)", channel.topic or "")
-    return int(match.group(1)) if match else None
 
 
-def is_ticket_staff(interaction):
-    if interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator:
-        return True
-    settings = ticket_settings(interaction.guild)
-    role_id = settings.get("ticket_staff_role")
-    return bool(role_id and any(role.id == int(role_id) for role in interaction.user.roles))
+def ticket_type(channel):
+    try:
+        return channel.topic.split("|")[2]
+    except Exception:
+        return "support"
 
 
-class TicketCreateView(discord.ui.View):
-    def __init__(self):
+class TicketPanelView(discord.ui.View):
+    def __init__(self, guild=None):
         super().__init__(timeout=None)
+        self.guild = guild
+        self.buy.emoji = premium_emoji_obj(guild, "ticket")
+        self.claim.emoji = premium_emoji_obj(guild, "ticket")
+        self.support.emoji = premium_emoji_obj(guild, "ticket")
 
-    async def create_ticket(self, interaction, ticket_type, emoji):
+    async def create_ticket(self, interaction, kind, emoji_name):
         guild = interaction.guild
         settings = ticket_settings(guild)
-        category_id = settings["ticket_categories"].get(ticket_type.lower())
-
-        existing = discord.utils.find(
-            lambda c: is_ticket_channel(c) and ticket_owner_id(c) == interaction.user.id and not c.name.startswith("closed-"),
-            guild.text_channels
-        )
-        if existing:
-            return await interaction.response.send_message(
-                embed=warning_embed("Ticket Already Open", f"You already have {existing.mention}."),
-                ephemeral=True
-            )
-
-        category = guild.get_channel(int(category_id)) if category_id else None
+        category_id = settings[kind]
+        category = guild.get_channel(category_id) if category_id else None
         if not isinstance(category, discord.CategoryChannel):
-            return await interaction.response.send_message(
-                embed=error_embed(
-                    "Ticket Category Not Set",
-                    f"The **{ticket_type}** ticket category is not configured. An admin can set it from the dashboard."
-                ),
-                ephemeral=True
-            )
+            return await interaction.response.send_message(embed=error_embed("Category Not Set", f"Set the `{kind}` ticket category in the main.py config."), ephemeral=True)
+
+        existing = [c for c in guild.text_channels if is_ticket_channel(c) and ticket_owner_id(c) == interaction.user.id and c.name.startswith(f"{kind}-")]
+        if existing:
+            return await interaction.response.send_message(embed=warning_embed("Ticket Already Open", f"You already have {existing[0].mention}."), ephemeral=True)
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True, manage_messages=True)
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True),
         }
-
-        settings_role_id = settings.get("ticket_staff_role")
-        if settings_role_id:
-            role = guild.get_role(int(settings_role_id))
+        if settings["staff_role"]:
+            role = guild.get_role(settings["staff_role"])
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
-        else:
-            for role in guild.roles:
-                if not role.is_default() and (role.permissions.manage_channels or role.permissions.administrator):
-                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
 
-        safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", interaction.user.name.lower()).strip("-") or "user"
         channel = await guild.create_text_channel(
-            name=f"{ticket_type.lower()}-{safe_name}"[:100],
+            name=f"{kind}-{interaction.user.name}"[:100],
             category=category,
-            topic=f"Ticket Type: {ticket_type} | Ticket Owner: {interaction.user.id} | Status: Open",
-            overwrites=overwrites
+            topic=f"VISTO_TICKET|{interaction.user.id}|{kind}|open",
+            overwrites=overwrites,
         )
+        db["tickets"].setdefault(str(guild.id), {})[str(channel.id)] = {
+            "owner_id": interaction.user.id,
+            "type": kind,
+            "closed": False,
+            "claimed_by": None,
+            "created": int(datetime.now(timezone.utc).timestamp()),
+        }
+        save_database()
 
+        emoji = premium_emoji(guild, emoji_name)
         embed = discord.Embed(
-            title=f"{emoji} {ticket_type} Ticket",
+            title=f"{emoji} {kind.title()} Ticket",
             description=(
                 f"Welcome {interaction.user.mention}!\n\n"
-                f"Your **{ticket_type.lower()}** ticket has been created.\n"
-                "Please explain what you need and a staff member will assist you.\n\n"
-                "When you're finished, use **Close Ticket** below."
+                "A staff member will assist you.\n\n"
+                "A staff member can **Claim Ticket** so you know who is assisting you.\n\n"
+                "Use **Close Ticket** when you are finished."
             ),
             color=discord.Color.blurple(),
-            timestamp=datetime.now(timezone.utc)
         )
-        embed.add_field(name="Ticket Owner", value=interaction.user.mention, inline=True)
-        embed.add_field(name="Ticket Type", value=f"{emoji} {ticket_type}", inline=True)
-        embed.set_footer(text="Visto Tickets")
+        await channel.send(embed=embed, view=TicketControlsView(guild))
+        await interaction.response.send_message(embed=success_embed("Ticket Created", f"Your ticket is {channel.mention}."), ephemeral=True)
+        await send_log(guild, f"{premium_emoji(guild, 'ticket', '🎫')} Ticket Created", f"**Type:** {kind}\n**User:** {interaction.user.mention}\n**Channel:** {channel.mention}")
 
-        await channel.send(
-            content=interaction.user.mention,
-            embed=embed,
-            view=TicketCloseView()
-        )
-
-        await interaction.response.send_message(
-            embed=success_embed("Ticket Created", f"Your ticket is {channel.mention}."),
-            ephemeral=True
-        )
-
-        await send_log(
-            guild,
-            "🎫 Ticket Created",
-            f"**User:** {interaction.user.mention}\n**Type:** {emoji} {ticket_type}\n**Channel:** {channel.mention}\n**Category:** {category.mention}",
-            discord.Color.blurple()
-        )
-
-    @discord.ui.button(label="Buy", emoji="🛒", style=discord.ButtonStyle.success, custom_id="visto_ticket_buy")
+    @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, custom_id="visto_ticket_buy")
     async def buy(self, interaction, button):
-        await self.create_ticket(interaction, "Buy", "🛒")
+        await self.create_ticket(interaction, "buy", "ticket")
 
-    @discord.ui.button(label="Claim", emoji="🎁", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim")
     async def claim(self, interaction, button):
-        await self.create_ticket(interaction, "Claim", "🎁")
+        await self.create_ticket(interaction, "claim", "ticket")
 
-    @discord.ui.button(label="Support", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_support")
+    @discord.ui.button(label="Support", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_support")
     async def support(self, interaction, button):
-        await self.create_ticket(interaction, "Support", "🛠️")
+        await self.create_ticket(interaction, "support", "ticket")
 
 
-class TicketConfirmCloseView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
-
-    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger, custom_id="visto_ticket_confirm_close")
-    async def confirm(self, interaction, button):
-        if not is_ticket_staff(interaction):
-            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
-
-        channel = interaction.channel
-        owner_id = ticket_owner_id(channel)
-        settings = ticket_settings(interaction.guild)
-        closed_role_id = settings.get("ticket_staff_role")
-
-        await interaction.response.defer()
-
-        overwrite = channel.overwrites_for(interaction.guild.default_role)
-        overwrite.view_channel = False
-        overwrite.send_messages = False
-        await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-
-        if owner_id:
-            owner = interaction.guild.get_member(owner_id)
-            if owner:
-                owner_overwrite = channel.overwrites_for(owner)
-                owner_overwrite.send_messages = False
-                owner_overwrite.view_channel = True
-                await channel.set_permissions(owner, overwrite=owner_overwrite)
-
-        channel.topic = (channel.topic or "") + f" | Status: Closed | Closed By: {interaction.user.id}"
-        new_name = channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}"
-        try:
-            await channel.edit(name=new_name[:100], topic=channel.topic)
-        except discord.HTTPException:
-            pass
-
-        embed = warning_embed(
-            "Ticket Closed",
-            f"This ticket has been closed by {interaction.user.mention}.\n\nUse the button below to delete it permanently."
-        )
-        await channel.send(embed=embed, view=ClosedTicketView())
-
-        await interaction.followup.send(embed=success_embed("Ticket Closed", "The ticket has been locked and marked as closed."), ephemeral=True)
-
-        await send_log(
-            interaction.guild,
-            "🔒 Ticket Closed",
-            f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}",
-            discord.Color.orange()
-        )
-
-    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_cancel_close")
-    async def cancel(self, interaction, button):
-        await interaction.response.edit_message(
-            embed=info_embed("Close Cancelled", "The ticket will remain open."),
-            view=None
-        )
-
-
-class TicketCloseView(discord.ui.View):
-    def __init__(self):
+class TicketControlsView(discord.ui.View):
+    def __init__(self, guild=None):
         super().__init__(timeout=None)
+        self.guild = guild
+        self.claim_ticket.emoji = premium_emoji_obj(guild, "ticket")
+        # Keep the close control readable with the normal lock icon.
+        self.close.emoji = "🔒"
+
+    @discord.ui.button(label="Claim Ticket", emoji="👤", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
+    async def claim_ticket(self, interaction, button):
+        channel = interaction.channel
+        if not is_ticket_channel(channel):
+            return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This is not a Visto ticket."), ephemeral=True)
+
+        settings = ticket_settings(interaction.guild)
+        staff_role = interaction.guild.get_role(settings["staff_role"]) if settings["staff_role"] else None
+        allowed = (
+            interaction.user.guild_permissions.manage_channels
+            or interaction.user.guild_permissions.administrator
+            or (staff_role and staff_role in interaction.user.roles)
+        )
+        if not allowed:
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can claim tickets."), ephemeral=True)
+
+        ticket_data = db["tickets"].setdefault(str(interaction.guild.id), {}).setdefault(str(channel.id), {})
+        claimed_by = ticket_data.get("claimed_by")
+
+        if claimed_by:
+            if int(claimed_by) != interaction.user.id:
+                return await interaction.response.send_message(
+                    embed=warning_embed("Ticket Already Claimed", f"This ticket is currently being handled by <@{claimed_by}>."),
+                    ephemeral=True,
+                )
+            ticket_data["claimed_by"] = None
+            save_database()
+            self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket")
+            button.label = "Claim Ticket"
+            embed = discord.Embed(
+                title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Unclaimed",
+                description=f"{interaction.user.mention} has **unclaimed** this ticket. Another staff member can now claim it.",
+                color=discord.Color.orange(),
+            )
+            await interaction.response.edit_message(view=self)
+            await channel.send(embed=embed)
+            return
+
+        ticket_data["claimed_by"] = interaction.user.id
+        save_database()
+        self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket")
+        button.label = "Claimed"
+        embed = discord.Embed(
+            title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed",
+            description=f"This ticket is being handled by **{interaction.user.mention}**.\n\nOnly the claiming staff member should take ownership of the conversation unless they unclaim it.",
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(view=self)
+        await channel.send(embed=embed)
+        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed", f"**Channel:** {channel.mention}\n**Claimed by:** {interaction.user.mention}", discord.Color.green())
 
     @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
     async def close(self, interaction, button):
         if not is_ticket_channel(interaction.channel):
-            return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This channel isn't a Visto ticket."), ephemeral=True)
-        if not is_ticket_staff(interaction):
-            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
-        await interaction.response.send_message(
-            embed=warning_embed("Confirm Ticket Close", "Are you sure you want to close this ticket? This will lock it but will not delete it."),
-            view=TicketConfirmCloseView(),
-            ephemeral=True
-        )
+            return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This is not a Visto ticket."), ephemeral=True)
+        settings = ticket_settings(interaction.guild)
+        staff_role = interaction.guild.get_role(settings["staff_role"]) if settings["staff_role"] else None
+        allowed = interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator or (staff_role and staff_role in interaction.user.roles)
+        if not allowed:
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only staff can close tickets."), ephemeral=True)
+        await interaction.response.send_message(embed=warning_embed("Confirm Ticket Close", "Are you sure you want to close this ticket?"), view=TicketCloseConfirmView(), ephemeral=True)
+
+
+class TicketCloseConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        reason = await ask_reason(interaction, "Close Ticket", "Enter the ticket closing reason")
+        channel = interaction.channel
+        owner_id = ticket_owner_id(channel)
+        owner = interaction.guild.get_member(owner_id) if owner_id else None
+
+        if owner:
+            await safe_dm(owner, discord.Embed(title="🔒 Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
+
+        if owner:
+            await channel.set_permissions(owner, view_channel=False, send_messages=False)
+        settings = ticket_settings(interaction.guild)
+        if settings["staff_role"]:
+            role = interaction.guild.get_role(settings["staff_role"])
+            if role:
+                await channel.set_permissions(role, view_channel=True, send_messages=False, read_message_history=True)
+
+        await channel.edit(name=f"closed-{channel.name}"[:100], topic=f"VISTO_TICKET|{owner_id}|{ticket_type(channel)}|closed|{reason[:800]}")
+        db["tickets"].setdefault(str(interaction.guild.id), {}).setdefault(str(channel.id), {})["closed"] = True
+        db["tickets"][str(interaction.guild.id)][str(channel.id)]["close_reason"] = reason
+        save_database()
+
+        embed = discord.Embed(title="🔒 Ticket Closed", description=f"**Closed by:** {interaction.user.mention}\n**Reason:** {reason}\n\nThis ticket is now closed.", color=discord.Color.orange())
+        await channel.send(embed=embed, view=ClosedTicketView())
+        await interaction.response.edit_message(embed=success_embed("Ticket Closed", f"Closed for \"{reason}\"."), view=None)
+        await send_log(interaction.guild, "🔒 Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        await interaction.response.edit_message(embed=info_embed("Close Cancelled", "The ticket remains open."), view=None)
 
 
 class ClosedTicketView(discord.ui.View):
@@ -3044,199 +1517,1575 @@ class ClosedTicketView(discord.ui.View):
 
     @discord.ui.button(label="Delete Ticket", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="visto_ticket_delete")
     async def delete(self, interaction, button):
-        if not is_ticket_staff(interaction):
-            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can delete tickets."), ephemeral=True)
-        await interaction.response.send_message(embed=warning_embed("Deleting Ticket", "Deleting this ticket in **5 seconds**."))
-        await send_log(interaction.guild, "🗑️ Ticket Deleted", f"**Channel:** {interaction.channel.name}\n**Deleted by:** {interaction.user.mention}", discord.Color.red())
-        await asyncio.sleep(5)
-        try:
-            await interaction.channel.delete()
-        except discord.HTTPException:
-            pass
+        if not interaction.user.guild_permissions.manage_channels and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(embed=error_embed("No Permission", "Only staff can delete closed tickets."), ephemeral=True)
+        await interaction.response.send_message(embed=warning_embed("Deleting Ticket", "Deleting this ticket in 3 seconds."))
+        await asyncio.sleep(3)
+        await interaction.channel.delete()
 
     @discord.ui.button(label="Transcript", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_transcript")
     async def transcript(self, interaction, button):
-        if not is_ticket_staff(interaction):
-            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can create transcripts."), ephemeral=True)
         messages = []
-        async for msg in interaction.channel.history(limit=500, oldest_first=True):
-            messages.append(f"[{msg.created_at:%Y-%m-%d %H:%M:%S}] {msg.author}: {msg.content}")
-        transcript = "\n".join(messages) or "No messages."
-        filename = f"transcript-{interaction.channel.id}.txt"
-        with open(filename, "w", encoding="utf-8") as file:
-            file.write(transcript)
-        await interaction.response.send_message(file=discord.File(filename), ephemeral=True)
-        try:
-            os.remove(filename)
-        except OSError:
-            pass
+        async for message in interaction.channel.history(limit=200, oldest_first=True):
+            messages.append(f"[{message.created_at:%Y-%m-%d %H:%M}] {message.author}: {message.content}")
+        text = "\n".join(messages) or "No messages."
+        data = discord.File(fp=__import__("io").BytesIO(text.encode("utf-8")), filename=f"{interaction.channel.name}-transcript.txt")
+        await interaction.response.send_message(file=data, ephemeral=True)
 
 
-class UserAddModal(discord.ui.Modal, title="Add User To Ticket"):
-    user_id = discord.ui.TextInput(label="User ID", placeholder="Enter the Discord user ID", required=True, max_length=30)
-
-    async def on_submit(self, interaction):
-        if not is_ticket_staff(interaction):
-            return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can add users."), ephemeral=True)
-        try:
-            user = await interaction.guild.fetch_member(int(self.user_id.value.strip()))
-        except (ValueError, discord.NotFound, discord.HTTPException):
-            return await interaction.response.send_message(embed=error_embed("User Not Found", "Enter a valid member ID from this server."), ephemeral=True)
-        await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
-        await interaction.response.send_message(embed=success_embed("User Added", f"{user.mention} can now access this ticket."))
-
-
-user_group = app_commands.Group(name="user", description="Manage users in the current ticket")
-
-@user_group.command(name="add", description="Add a user to the current ticket")
-@app_commands.describe(user="Member to add to this ticket")
-async def user_add(interaction, user: discord.Member):
-    if not is_ticket_channel(interaction.channel):
-        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "Use this command inside a ticket."), ephemeral=True)
-    if not is_ticket_staff(interaction):
-        return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can add users."), ephemeral=True)
-    await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
-    await interaction.response.send_message(embed=success_embed("User Added", f"{user.mention} has been added to {interaction.channel.mention}."))
-
-bot.tree.add_command(user_group)
-
-
-ticket_group = app_commands.Group(name="ticket", description="Visto ticket system")
-
-@ticket_group.command(name="setup", description="Create the ticket panel")
+@bot.tree.command(name="ticket_setup", description="Post the ticket panel")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def ticket_setup(interaction):
+    ticket_emoji = premium_emoji(interaction.guild, "ticket", "🎫")
     embed = discord.Embed(
-        title="🎫 Visto Tickets",
+        title=f"{ticket_emoji} Visto Tickets",
         description=(
-            "Choose the type of ticket you want to open.\n\n"
-            "🛒 **Buy** — Purchase or order help.\n"
-            "🎁 **Claim** — Claim/reward help.\n"
-            "🛠️ **Support** — General support.\n\n"
-            "Each ticket type is created in its configured category."
+            "Choose what you need below.\n\n"
+            f"{ticket_emoji} **Buy** — purchase help\n"
+            f"{ticket_emoji} **Claim** — claim help\n"
+            f"{ticket_emoji} **Support** — general support"
         ),
         color=discord.Color.blurple(),
-        timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text="Visto Tickets")
-    await interaction.channel.send(embed=embed, view=TicketCreateView())
-    await interaction.response.send_message(embed=success_embed("Ticket Panel Created", "The ticket panel has been posted."), ephemeral=True)
+    await interaction.channel.send(embed=embed, view=TicketPanelView(interaction.guild))
+    await interaction.response.send_message(embed=success_embed("Ticket Panel", "Panel posted."), ephemeral=True)
 
-@ticket_group.command(name="close", description="Close the current ticket")
-async def ticket_close(interaction):
+
+# Alias group /ticket setup and /ticket close.
+ticket_group = app_commands.Group(name="ticket", description="Ticket system")
+
+@ticket_group.command(name="setup", description="Post the ticket panel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def ticket_group_setup(interaction):
+    await ticket_setup.callback(interaction)
+
+@ticket_group.command(name="close", description="Close current ticket")
+async def ticket_group_close(interaction):
     if not is_ticket_channel(interaction.channel):
-        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This channel isn't a Visto ticket."), ephemeral=True)
-    if not is_ticket_staff(interaction):
-        return await interaction.response.send_message(embed=error_embed("No Permission", "Only ticket staff can close tickets."), ephemeral=True)
-    await interaction.response.send_message(embed=warning_embed("Confirm Ticket Close", "Are you sure you want to close this ticket?"), view=TicketConfirmCloseView(), ephemeral=True)
+        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This is not a Visto ticket."), ephemeral=True)
+    await interaction.response.send_message(embed=warning_embed("Confirm Ticket Close", "Are you sure?"), view=TicketCloseConfirmView(), ephemeral=True)
 
 bot.tree.add_command(ticket_group)
 
 
 # ============================================================
-# GIVEAWAY COMMAND GROUP
+# /user add
 # ============================================================
 
-giveaway_group = app_commands.Group(
-    name="giveaway",
-    description="Visto giveaway system"
-)
+user_group = app_commands.Group(name="user", description="Ticket user management")
+
+@user_group.command(name="add", description="Add a user to the current ticket")
+@app_commands.describe(user="User to add")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def user_add(interaction, user: discord.Member):
+    if not is_ticket_channel(interaction.channel):
+        return await interaction.response.send_message(embed=error_embed("Not A Ticket", "Use this inside a ticket."), ephemeral=True)
+    await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+    await interaction.response.send_message(embed=success_embed("User Added", f"Added {user.mention} to {interaction.channel.mention}."))
+    await safe_dm(user, discord.Embed(title="🎫 Added To Ticket", description=f"You were added to {interaction.channel.mention} in **{interaction.guild.name}**.", color=discord.Color.blurple()))
+
+bot.tree.add_command(user_group)
 
 
-@giveaway_group.command(
-    name="start",
-    description="Start a giveaway"
-)
+# ============================================================
+# GIVEAWAYS — ADVANCED
+# ============================================================
+
+giveaway_tasks = {}
+
+
+def giveaway_entry_counts(data):
+    """Return {user_id: number_of_entries} for both old and new database formats."""
+    counts = {}
+    entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        entries = list(entries)
+    for uid in entries:
+        key = str(uid)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def create_giveaway_embed(data, guild=None):
+    end_time = int(data["end_time"])
+    giveaway_emoji = premium_emoji(guild, "giveaway")
+    embed = discord.Embed(
+        title=data.get("title") or f"{giveaway_emoji} GIVEAWAY {giveaway_emoji}",
+        description=data.get("description") or f"Click **{giveaway_emoji} Enter Giveaway** to participate!",
+        color=int(data.get("color", 15844367)),
+    )
+    arrow = premium_emoji(guild, "arrow")
+    embed.add_field(name=f"{arrow} Prize", value=data["prize"], inline=False)
+    embed.add_field(name=f"{arrow} Winners", value=str(data["winners"]), inline=True)
+    embed.add_field(name=f"{arrow} Host", value=data.get("host_text") or f"<@{data['host_id']}>", inline=True)
+    embed.add_field(name=f"{arrow} Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
+    embed.add_field(name=f"{arrow} Participants", value=str(len(giveaway_entry_counts(data))), inline=True)
+    embed.add_field(name=f"{arrow} Ends", value=f"<t:{end_time}:R>", inline=True)
+    if data.get("required_role_id"):
+        embed.add_field(name=f"{arrow} Required Role", value=f"<@&{data['required_role_id']}>", inline=True)
+    if data.get("blacklisted_role_id"):
+        embed.add_field(name=f"{arrow} Blacklisted Role", value=f"<@&{data['blacklisted_role_id']}>", inline=True)
+    if data.get("extra_role_id") and int(data.get("extra_entries", 0)) > 0:
+        embed.add_field(name=f"{arrow} Extra Entries", value=f"<@&{data['extra_role_id']}> = {data['extra_entries']} total entries", inline=False)
+    if data.get("image"):
+        embed.set_image(url=data["image"])
+    if data.get("thumbnail"):
+        embed.set_thumbnail(url=data["thumbnail"])
+    embed.set_footer(text="Visto Giveaways")
+    return embed
+
+
+class GiveawayParticipantsView(discord.ui.View):
+    def __init__(self, message_id, guild, page=0):
+        super().__init__(timeout=120)
+        self.message_id = str(message_id)
+        self.guild = guild
+        self.page = page
+        self.per_page = 10
+        self.previous.emoji = premium_emoji_obj(guild, "arrow")
+        self.next.emoji = premium_emoji_obj(guild, "arrow")
+        self.refresh_buttons()
+
+    def rows(self):
+        data = db["giveaways"].get(self.message_id, {})
+        counts = giveaway_entry_counts(data)
+        rows = []
+        for uid, amount in counts.items():
+            member = self.guild.get_member(int(uid))
+            rows.append((uid, amount, member.display_name if member else f"User {uid}"))
+        rows.sort(key=lambda row: (-row[1], row[2].lower()))
+        return rows
+
+    def pages(self):
+        return max(1, (len(self.rows()) + self.per_page - 1) // self.per_page)
+
+    def refresh_buttons(self):
+        pages = self.pages()
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= pages - 1
+
+    def make_embed(self):
+        data = db["giveaways"].get(self.message_id)
+        if not data:
+            return error_embed("Giveaway Not Found", "This giveaway no longer exists.")
+        rows = self.rows()
+        pages = self.pages()
+        chunk = rows[self.page * self.per_page:(self.page + 1) * self.per_page]
+        lines = []
+        for index, (uid, amount, _) in enumerate(chunk, start=self.page * self.per_page + 1):
+            lines.append(f"{premium_emoji(self.guild, 'arrow', '➡️')} **#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
+        if not lines:
+            lines = ["No participants yet."]
+        embed = discord.Embed(
+            title=f"{premium_emoji(self.guild, 'giveaway', '🎉')} Giveaway Participants",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        arrow = premium_emoji(self.guild, "arrow", "➡️")
+        embed.add_field(name=f"{arrow} Total Participants", value=str(len(rows)), inline=True)
+        embed.add_field(name=f"{arrow} Total Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
+        embed.set_footer(text=f"Page {self.page + 1}/{pages}")
+        return embed
+
+    async def update(self, interaction):
+        self.refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Previous", emoji="➡️", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.page = max(0, self.page - 1)
+        await self.update(interaction)
+
+    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        self.page = min(self.pages() - 1, self.page + 1)
+        await self.update(interaction)
+
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, disabled=False, guild=None):
+        super().__init__(timeout=None)
+        self.guild = guild
+        self.enter_button.emoji = premium_emoji_obj(guild, "giveaway")
+        self.participants.emoji = premium_emoji_obj(guild, "giveaway")
+        self.enter_button.disabled = disabled
+
+    @discord.ui.button(label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
+    async def enter_button(self, interaction, button):
+        gid = str(interaction.message.id)
+        data = db["giveaways"].get(gid)
+        if not data or data.get("ended"):
+            return await interaction.response.send_message(embed=warning_embed("Giveaway Ended", "This giveaway is no longer active."), ephemeral=True)
+        if interaction.user.bot:
+            return
+        entries = data.setdefault("entries", [])
+        if interaction.user.id in entries:
+            return await interaction.response.send_message(embed=warning_embed("Already Entered", "You're already entered."), ephemeral=True)
+
+        required = data.get("required_role_id")
+        if required and not any(r.id == int(required) for r in interaction.user.roles):
+            return await interaction.response.send_message(embed=error_embed("Entry Denied", f"You need <@&{required}> to enter."), ephemeral=True)
+        blacklisted = data.get("blacklisted_role_id")
+        if blacklisted and any(r.id == int(blacklisted) for r in interaction.user.roles):
+            return await interaction.response.send_message(embed=error_embed("Entry Denied", "Your role is not allowed to enter."), ephemeral=True)
+        account_age_days = int(data.get("min_account_age_days", 0))
+        if account_age_days:
+            age = (datetime.now(timezone.utc) - interaction.user.created_at).days
+            if age < account_age_days:
+                return await interaction.response.send_message(embed=error_embed("Entry Denied", f"Your account must be at least {account_age_days} days old."), ephemeral=True)
+        member_since_days = int(data.get("min_server_days", 0))
+        if member_since_days and isinstance(interaction.user, discord.Member):
+            if not interaction.user.joined_at or (datetime.now(timezone.utc) - interaction.user.joined_at).days < member_since_days:
+                return await interaction.response.send_message(embed=error_embed("Entry Denied", f"You must be in the server for at least {member_since_days} days."), ephemeral=True)
+
+        weight = 1
+        extra_role = data.get("extra_role_id")
+        if extra_role and any(r.id == int(extra_role) for r in interaction.user.roles):
+            weight = max(1, int(data.get("extra_entries", 0)))
+        for _ in range(weight):
+            entries.append(interaction.user.id)
+        save_database()
+
+        # The old code saved the entry but never edited the public giveaway
+        # message, so its displayed count stayed at 0. Refresh it immediately.
+        self.enter_button.emoji = premium_emoji_obj(interaction.guild, "giveaway")
+        self.participants.emoji = premium_emoji_obj(interaction.guild, "giveaway")
+        try:
+            await interaction.message.edit(embed=create_giveaway_embed(data, interaction.guild), view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or f"You entered the giveaway! {premium_emoji(interaction.guild, 'giveaway', '🎉')}"), ephemeral=True)
+
+    @discord.ui.button(label="Participants", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
+    async def participants(self, interaction, button):
+        data = db["giveaways"].get(str(interaction.message.id))
+        if not data:
+            return await interaction.response.send_message(embed=error_embed("Giveaway Not Found", "This giveaway no longer exists."), ephemeral=True)
+        view = GiveawayParticipantsView(interaction.message.id, interaction.guild)
+        await interaction.response.send_message(embed=view.make_embed(), view=view, ephemeral=True)
+
+
+def choose_weighted_winners(entries, winner_count):
+    """Pick unique winners while respecting duplicate/weighted entries."""
+    pool = list(entries)
+    winners = []
+    winner_count = min(max(0, int(winner_count)), len(set(pool)))
+    while pool and len(winners) < winner_count:
+        selected = random.choice(pool)
+        winners.append(selected)
+        # Remove all tickets belonging to the selected participant so one
+        # person cannot win multiple slots in the same giveaway.
+        pool = [uid for uid in pool if uid != selected]
+    return winners
+
+
+async def finish_giveaway(message_id, automatic=False):
+    key = str(message_id)
+    data = db["giveaways"].get(key)
+    if not data or data.get("ended"):
+        return None
+    data["ended"] = True
+    entries = list(data.get("entries", []))
+    unique = list(dict.fromkeys(entries))
+    winners = choose_weighted_winners(entries, data["winners"]) if entries else []
+    data["winners_selected"] = winners
+    save_database()
+
+    channel = bot.get_channel(int(data["channel_id"]))
+    if channel:
+        try:
+            message = await channel.fetch_message(int(message_id))
+            ended_embed = create_giveaway_embed(data, channel.guild)
+            ended_embed.title = f"{premium_emoji(channel.guild, 'giveaway', '🎉')} GIVEAWAY ENDED {premium_emoji(channel.guild, 'giveaway', '🎉')}"
+            ended_embed.color = discord.Color.dark_gold()
+            ended_embed.add_field(name="Status", value="Ended", inline=True)
+            await message.edit(embed=ended_embed, view=GiveawayView(disabled=True, guild=channel.guild))
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        mentions = " ".join(f"<@{uid}>" for uid in winners) or "Nobody"
+        await channel.send(embed=discord.Embed(title="🏆 Giveaway Winner(s)", description=f"**Prize:** {data['prize']}\n**Winner(s):** {mentions}", color=discord.Color.gold()))
+
+        for uid in winners:
+            try:
+                user = await bot.fetch_user(uid)
+                msg = data.get("winner_dm") or f"You won **{data['prize']}** in {channel.guild.name}!"
+                await user.send(msg)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+    return winners
+
+
+async def giveaway_timer(message_id):
+    while True:
+        data = db["giveaways"].get(str(message_id))
+        if not data or data.get("ended") or data.get("paused"):
+            return
+        remaining = data["end_time"] - datetime.now(timezone.utc).timestamp()
+        if remaining <= 0:
+            await finish_giveaway(message_id, automatic=True)
+            return
+        await asyncio.sleep(min(30, max(1, remaining)))
+
+
+def start_giveaway_task(message_id):
+    key = str(message_id)
+    if key not in giveaway_tasks or giveaway_tasks[key].done():
+        giveaway_tasks[key] = asyncio.create_task(giveaway_timer(message_id))
+
+
+giveaway_group = app_commands.Group(name="giveaway", description="Giveaway system")
+
+@giveaway_group.command(name="start", description="Start an advanced giveaway")
 @app_commands.describe(
-    prize="Giveaway prize",
-    duration="Examples: 10s, 5m, 2h, 3d, 2mo, 1y",
-    winners="Number of winners"
+    prize="Prize",
+    duration="Examples: 10m, 2h, 3d, 1d 5h 30m",
+    winners="Number of winners",
+    channel="Channel for the giveaway",
+    host="Optional host text",
+    description="Optional giveaway description",
+    image="Optional image URL",
+    thumbnail="Optional thumbnail URL",
+    required_role="Optional required role",
+    blacklisted_role="Optional blacklisted role",
+    extra_role="Optional role that receives extra entries",
+    extra_entries="Number of entries for the extra-entry role",
+    min_account_age_days="Minimum account age in days",
+    min_server_days="Minimum time in server in days",
+    winner_dm="Optional DM sent to winners",
 )
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
+@app_commands.checks.has_permissions(manage_guild=True)
 async def giveaway_start(
     interaction,
     prize: str,
     duration: str,
-    winners: int
+    winners: int,
+    channel: discord.TextChannel = None,
+    host: str = None,
+    description: str = None,
+    image: str = None,
+    thumbnail: str = None,
+    required_role: discord.Role = None,
+    blacklisted_role: discord.Role = None,
+    extra_role: discord.Role = None,
+    extra_entries: int = 0,
+    min_account_age_days: int = 0,
+    min_server_days: int = 0,
+    winner_dm: str = None,
 ):
+    seconds = duration_parser(duration)
+    if seconds is None or seconds < 60 or seconds > 365 * 86400:
+        return await interaction.response.send_message(embed=error_embed("Invalid Duration", "Use a duration between 1 minute and 1 year, e.g. `2h`, `3d`, `1d 5h 30m`."), ephemeral=True)
+    if winners < 1 or winners > 100:
+        return await interaction.response.send_message(embed=error_embed("Invalid Winners", "Winners must be between 1 and 100."), ephemeral=True)
+    if extra_entries < 0 or extra_entries > 100:
+        return await interaction.response.send_message(embed=error_embed("Invalid Extra Entries", "Use 0-100."), ephemeral=True)
+    if min_account_age_days < 0 or min_server_days < 0:
+        return await interaction.response.send_message(embed=error_embed("Invalid Requirement", "Days cannot be negative."), ephemeral=True)
 
-    if winners < 1 or winners > 25:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Winners",
-                "Winners must be between 1 and 25."
-            ),
-            ephemeral=True
-        )
-
-    seconds = parse_duration(
-        duration
-    )
-
-    if seconds is None:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Invalid Duration",
-                (
-                    "Use formats like:\n"
-                    "`10s` • `5m` • `2h` • `3d` • `2mo` • `1y`\n\n"
-                    "You can combine them:\n"
-                    "`1d 5h 30m`"
-                )
-            ),
-            ephemeral=True
-        )
-
-    if seconds < 10:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Duration Too Short",
-                "Giveaways must last at least 10 seconds."
-            ),
-            ephemeral=True
-        )
-
-    end_time = int(
-        datetime.now(
-            timezone.utc
-        ).timestamp()
-    ) + seconds
-
-    giveaway_data = {
+    target = channel or interaction.channel
+    data = {
         "guild_id": interaction.guild.id,
-        "channel_id": interaction.channel.id,
+        "channel_id": target.id,
         "prize": prize,
         "winners": winners,
         "host_id": interaction.user.id,
-        "end_time": end_time,
+        "host_text": host,
+        "description": description,
+        "image": image,
+        "thumbnail": thumbnail,
+        "required_role_id": required_role.id if required_role else None,
+        "blacklisted_role_id": blacklisted_role.id if blacklisted_role else None,
+        "extra_role_id": extra_role.id if extra_role else None,
+        "extra_entries": extra_entries,
+        "min_account_age_days": min_account_age_days,
+        "min_server_days": min_server_days,
+        "winner_dm": winner_dm,
+        "entry_confirmation": "You entered the giveaway!",
         "entries": [],
+        "winners_selected": [],
+        "end_time": datetime.now(timezone.utc).timestamp() + seconds,
         "ended": False,
-        "winners_selected": []
+        "paused": False,
+        "duration": duration,
     }
+    await interaction.response.defer(ephemeral=True)
+    message = await target.send(embed=create_giveaway_embed(data, interaction.guild), view=GiveawayView(guild=interaction.guild))
+    db["giveaways"][str(message.id)] = data
+    save_database()
+    start_giveaway_task(message.id)
+    await interaction.followup.send(embed=success_embed("Giveaway Started", f"Created in {target.mention}.\n**Message ID:** `{message.id}`"), ephemeral=True)
 
-    await interaction.response.send_message(
-        embed=info_embed(
-            "Creating Giveaway",
-            "Please wait..."
-        ),
-        ephemeral=True
+
+@giveaway_group.command(name="end", description="End a giveaway")
+@app_commands.describe(message_id="Giveaway message ID")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_end(interaction, message_id: str):
+    result = await finish_giveaway(message_id)
+    if result is None:
+        return await interaction.response.send_message(embed=error_embed("Not Found", "That giveaway was not found or already ended."), ephemeral=True)
+    await interaction.response.send_message(embed=success_embed("Giveaway Ended", f"Ended `{message_id}`."))
+
+
+@giveaway_group.command(name="reroll", description="Reroll a giveaway")
+@app_commands.describe(message_id="Ended giveaway message ID")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_reroll(interaction, message_id: str):
+    data = db["giveaways"].get(str(message_id))
+    if not data or not data.get("ended"):
+        return await interaction.response.send_message(embed=error_embed("Not Found", "That ended giveaway could not be found."), ephemeral=True)
+    entries = list(data.get("entries", []))
+    if not entries:
+        return await interaction.response.send_message(embed=error_embed("No Entries", "Nobody entered."), ephemeral=True)
+    winners = choose_weighted_winners(entries, data["winners"])
+    data["winners_selected"] = winners
+    save_database()
+    mentions = " ".join(f"<@{uid}>" for uid in winners)
+    await interaction.response.send_message(embed=discord.Embed(title="🔄 Giveaway Rerolled", description=f"**Prize:** {data['prize']}\n**New winner(s):** {mentions}", color=discord.Color.gold()))
+
+
+@giveaway_group.command(name="pause", description="Pause an active giveaway")
+@app_commands.describe(message_id="Giveaway message ID")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_pause(interaction, message_id: str):
+    data = db["giveaways"].get(str(message_id))
+    if not data or data.get("ended"):
+        return await interaction.response.send_message(embed=error_embed("Not Found", "Active giveaway not found."), ephemeral=True)
+    data["paused"] = True
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Giveaway Paused", f"Paused `{message_id}`."))
+
+
+@giveaway_group.command(name="resume", description="Resume a paused giveaway")
+@app_commands.describe(message_id="Giveaway message ID")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_resume(interaction, message_id: str):
+    data = db["giveaways"].get(str(message_id))
+    if not data or data.get("ended"):
+        return await interaction.response.send_message(embed=error_embed("Not Found", "Giveaway not found."), ephemeral=True)
+    data["paused"] = False
+    save_database()
+    start_giveaway_task(message_id)
+    await interaction.response.send_message(embed=success_embed("Giveaway Resumed", f"Resumed `{message_id}`."))
+
+
+@giveaway_group.command(name="delete", description="Delete giveaway data")
+@app_commands.describe(message_id="Giveaway message ID")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def giveaway_delete(interaction, message_id: str):
+    if str(message_id) not in db["giveaways"]:
+        return await interaction.response.send_message(embed=error_embed("Not Found", "Giveaway not found."), ephemeral=True)
+    db["giveaways"].pop(str(message_id), None)
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Giveaway Deleted", f"Deleted data for `{message_id}`."))
+
+bot.tree.add_command(giveaway_group)
+
+
+# ============================================================
+# /STATS
+# ============================================================
+
+stats_group = app_commands.Group(
+    name="stats",
+    description="Manage message and invite statistics"
+)
+
+
+# ============================================================
+# /stats messages
+# ============================================================
+
+@stats_group.command(
+    name="messages",
+    description="Add, remove, or reset message statistics"
+)
+@app_commands.describe(
+    action="Choose add, remove, or reset",
+    user="User whose statistics will be changed",
+    amount="Amount to add/remove. Not needed for reset."
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def stats_messages(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    user: discord.Member,
+    amount: int = None
+):
+
+    guild_id = interaction.guild.id
+    user_id = str(user.id)
+
+    messages = get_guild_data(
+        "messages",
+        guild_id
     )
 
-    message = await interaction.channel.send(
+    if action.value == "reset":
+
+        messages[user_id] = 0
+
+        daily = get_guild_data(
+            "message_daily",
+            guild_id
+        )
+
+        for date_data in daily.values():
+            date_data.pop(
+                user_id,
+                None
+            )
+
+        save_database()
+
+        return await interaction.response.send_message(
+            embed=success_embed(
+                "Messages Reset",
+                f"Reset message statistics for {user.mention}."
+            )
+        )
+
+    if amount is None:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Amount Required",
+                "You need to provide an amount for **Add** or **Remove**."
+            ),
+            ephemeral=True
+        )
+
+    if amount < 1:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Amount must be at least `1`."
+            ),
+            ephemeral=True
+        )
+
+    current = int(
+        messages.get(
+            user_id,
+            0
+        )
+    )
+
+    if action.value == "add":
+        messages[user_id] = current + amount
+
+    elif action.value == "remove":
+        messages[user_id] = max(
+            0,
+            current - amount
+        )
+
+    save_database()
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Message Statistics Updated",
+            (
+                f"**User:** {user.mention}\n"
+                f"**Action:** {action.name}\n"
+                f"**Amount:** `{amount:,}`\n"
+                f"**New Total:** `{messages[user_id]:,}`"
+            )
+        )
+    )
+
+
+# ============================================================
+# /stats invites
+# ============================================================
+
+@stats_group.command(
+    name="invites",
+    description="Add, remove, or reset invite statistics"
+)
+@app_commands.describe(
+    action="Choose add, remove, or reset",
+    user="User whose statistics will be changed",
+    amount="Amount to add/remove. Not needed for reset."
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Remove", value="remove"),
+        app_commands.Choice(name="Reset", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def stats_invites(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    user: discord.Member,
+    amount: int = None
+):
+
+    guild_id = interaction.guild.id
+
+    stats = get_invite_stats(
+        guild_id,
+        user.id
+    )
+
+    if action.value == "reset":
+
+        stats["joins"] = 0
+        stats["fake"] = 0
+        stats["left"] = 0
+        stats["rejoins"] = 0
+        stats["total"] = 0
+
+        save_database()
+
+        return await interaction.response.send_message(
+            embed=success_embed(
+                "Invites Reset",
+                f"Reset invite statistics for {user.mention}."
+            )
+        )
+
+    if amount is None:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Amount Required",
+                "You need to provide an amount for **Add** or **Remove**."
+            ),
+            ephemeral=True
+        )
+
+    if amount < 1:
+        return await interaction.response.send_message(
+            embed=error_embed(
+                "Invalid Amount",
+                "Amount must be at least `1`."
+            ),
+            ephemeral=True
+        )
+
+    if action.value == "add":
+
+        stats["joins"] += amount
+
+    elif action.value == "remove":
+
+        stats["joins"] = max(
+            0,
+            stats["joins"] - amount
+        )
+
+    stats["total"] = max(
+        0,
+        stats["joins"] - stats["left"]
+    )
+
+    save_database()
+
+    await interaction.response.send_message(
+        embed=success_embed(
+            "Invite Statistics Updated",
+            (
+                f"**User:** {user.mention}\n"
+                f"**Action:** {action.name}\n"
+                f"**Amount:** `{amount:,}`\n"
+                f"**Joins:** `{stats['joins']:,}`\n"
+                f"**Active Invites:** `{stats['total']:,}`"
+            )
+        )
+    )
+
+
+# ============================================================
+# REGISTER /stats
+# ============================================================
+
+bot.tree.add_command(
+    stats_group
+)
+
+
+# ============================================================
+# LEADERBOARD SHORTCUTS
+# ============================================================
+
+@bot.command(name="lb")
+async def lb(ctx, mode=None):
+    mode = (mode or "messages").lower()
+    if mode == "messages":
+        view = MessageLeaderboardView(ctx)
+        return await ctx.send(embed=view.make_embed(), view=view)
+    if mode == "invites":
+        data = get_guild_data("invites", ctx.guild.id)
+        rows = []
+        for uid in data:
+            rows.append((uid, get_invite_stats(ctx.guild.id, uid)["total"]))
+        rows.sort(key=lambda x: x[1], reverse=True)
+        lines = [f"**#{i}** <@{uid}> • `{amount}` invites" for i, (uid, amount) in enumerate(rows[:10], 1)]
+        return await ctx.send(embed=info_embed("Invite Leaderboard", "\n".join(lines) if lines else "No data."))
+    await ctx.send(embed=error_embed("Usage", "Use `-lb messages` or `-lb invites`."))
+
+
+# ============================================================
+# SERVER MESSAGE/INVITE CONFIG
+# ============================================================
+
+@bot.tree.command(name="setgeneral", description="Set the message-counting channel")
+@app_commands.describe(channel="General channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setgeneral(interaction, channel: discord.TextChannel):
+    settings = get_guild_data("settings", interaction.guild.id)
+    settings["general_channel"] = channel.id
+    save_database()
+    await interaction.response.send_message(embed=success_embed("General Channel Set", f"Messages will now be counted only in {channel.mention}."))
+
+
+@bot.tree.command(name="setlog", description="Set logging channel")
+@app_commands.describe(channel="Logging channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def setlog(interaction, channel: discord.TextChannel):
+    settings = get_guild_data("settings", interaction.guild.id)
+    settings["log_channel"] = channel.id
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Log Channel Set", f"Logs will go to {channel.mention}."))
+
+
+@bot.tree.command(name="set_ticket_categories", description="Set ticket categories")
+@app_commands.describe(buy="Buy category", claim="Claim category", support="Support category", staff_role="Ticket staff role")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def set_ticket_categories(interaction, buy: discord.CategoryChannel, claim: discord.CategoryChannel, support: discord.CategoryChannel, staff_role: discord.Role = None):
+    settings = get_guild_data("settings", interaction.guild.id)
+    settings["ticket_buy_category"] = buy.id
+    settings["ticket_claim_category"] = claim.id
+    settings["ticket_support_category"] = support.id
+    if staff_role:
+        settings["ticket_staff_role"] = staff_role.id
+    save_database()
+    await interaction.response.send_message(embed=success_embed("Ticket Settings Updated", "Buy / Claim / Support categories were saved."))
+
+
+# ============================================================
+# PROFESSIONAL VISTO BOT DASHBOARD
+# ============================================================
+
+_dashboard_server = None
+
+
+# ------------------------------------------------------------
+# DATABASE BACKUP
+# ------------------------------------------------------------
+
+def dashboard_backup_database():
+    try:
+        if os.path.exists(DB_FILE):
+            backup_name = (
+                f"{DB_FILE}.backup"
+            )
+
+            with open(
+                DB_FILE,
+                "rb"
+            ) as source:
+
+                with open(
+                    backup_name,
+                    "wb"
+                ) as backup:
+
+                    backup.write(
+                        source.read()
+                    )
+
+    except Exception as error:
+        print(
+            f"Dashboard backup error: {error}"
+        )
+
+
+# ------------------------------------------------------------
+# HTML
+# ------------------------------------------------------------
+
+def dashboard_page(
+    title,
+    body,
+    guild_id=None
+):
+
+    navigation = f"""
+    <aside class="sidebar">
+
+        <div class="brand">
+            <div class="brand-icon">V</div>
+            <div>
+                <div class="brand-name">
+                    Visto Bot
+                </div>
+                <div class="brand-sub">
+                    Control Panel
+                </div>
+            </div>
+        </div>
+
+        <a href="?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🏠 Overview
+        </a>
+
+        <a href="/settings?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            ⚙️ Server Settings
+        </a>
+
+        <a href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🛡️ Moderation
+        </a>
+
+        <a href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🎉 Giveaways
+        </a>
+
+        <a href="/tickets?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🎫 Tickets
+        </a>
+
+        <a href="/autoresponders?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            🤖 Autoresponders
+        </a>
+
+        <a href="/statistics?key={html.escape(DASHBOARD_PASSWORD)}"
+           class="nav-link">
+            📊 Statistics
+        </a>
+
+        <div class="sidebar-bottom">
+            <a href="/health" class="nav-link">
+                🟢 Bot Health
+            </a>
+        </div>
+
+    </aside>
+    """
+
+    return f"""
+<!doctype html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>
+{html.escape(title)} • Visto Bot
+</title>
+
+<style>
+
+* {{
+    box-sizing: border-box;
+}}
+
+body {{
+    margin: 0;
+    font-family:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    background:
+        #0b1020;
+
+    color:
+        #f8fafc;
+}}
+
+a {{
+    text-decoration: none;
+}}
+
+.layout {{
+    display: flex;
+    min-height: 100vh;
+}}
+
+.sidebar {{
+    width: 250px;
+    background: #0f172a;
+    border-right: 1px solid #1e293b;
+    padding: 24px 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+}}
+
+.brand {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 30px;
+    padding: 8px;
+}}
+
+.brand-icon {{
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(
+        135deg,
+        #6366f1,
+        #8b5cf6
+    );
+    font-weight: 900;
+    font-size: 20px;
+}}
+
+.brand-name {{
+    font-weight: 800;
+    font-size: 17px;
+}}
+
+.brand-sub {{
+    color: #64748b;
+    font-size: 12px;
+    margin-top: 2px;
+}}
+
+.nav-link {{
+    display: block;
+    color: #cbd5e1;
+    padding: 12px 14px;
+    border-radius: 10px;
+    margin-bottom: 5px;
+    transition: 0.15s;
+}}
+
+.nav-link:hover {{
+    background: #1e293b;
+    color: white;
+}}
+
+.sidebar-bottom {{
+    margin-top: 25px;
+    padding-top: 20px;
+    border-top: 1px solid #1e293b;
+}}
+
+.main {{
+    margin-left: 250px;
+    width: calc(100% - 250px);
+    padding: 30px;
+}}
+
+.topbar {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 28px;
+}}
+
+.page-title {{
+    font-size: 28px;
+    font-weight: 800;
+}}
+
+.page-subtitle {{
+    color: #94a3b8;
+    margin-top: 5px;
+}}
+
+.server-select {{
+    background: #111827;
+    border: 1px solid #334155;
+    color: white;
+    padding: 11px 14px;
+    border-radius: 10px;
+    min-width: 240px;
+}}
+
+.stats-grid {{
+    display: grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(190px, 1fr)
+        );
+    gap: 15px;
+    margin-bottom: 20px;
+}}
+
+.stat-card {{
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 15px;
+    padding: 18px;
+}}
+
+.stat-label {{
+    color: #94a3b8;
+    font-size: 13px;
+}}
+
+.stat-value {{
+    font-size: 28px;
+    font-weight: 800;
+    margin-top: 7px;
+}}
+
+.grid {{
+    display: grid;
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(330px, 1fr)
+        );
+    gap: 18px;
+}}
+
+.card {{
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 15px;
+    padding: 20px;
+}}
+
+.card h2 {{
+    margin-top: 0;
+    margin-bottom: 5px;
+    font-size: 18px;
+}}
+
+.muted {{
+    color: #94a3b8;
+    font-size: 13px;
+}}
+
+label {{
+    display: block;
+    color: #cbd5e1;
+    font-size: 13px;
+    margin-top: 14px;
+    margin-bottom: 6px;
+}}
+
+input,
+select,
+textarea {{
+    width: 100%;
+    background: #0b1220;
+    border: 1px solid #334155;
+    border-radius: 9px;
+    padding: 11px;
+    color: white;
+    outline: none;
+}}
+
+textarea {{
+    resize: vertical;
+    min-height: 90px;
+}}
+
+input:focus,
+select:focus,
+textarea:focus {{
+    border-color: #6366f1;
+}}
+
+button,
+.btn {{
+    display: inline-block;
+    border: 0;
+    border-radius: 9px;
+    padding: 11px 16px;
+    background: #6366f1;
+    color: white;
+    cursor: pointer;
+    font-weight: 700;
+    margin-top: 14px;
+}}
+
+.btn-danger {{
+    background: #dc2626;
+}}
+
+.btn-success {{
+    background: #16a34a;
+}}
+
+.btn-secondary {{
+    background: #334155;
+}}
+
+hr {{
+    border: 0;
+    border-top: 1px solid #1e293b;
+    margin: 20px 0;
+}}
+
+.notice {{
+    background: #172554;
+    border: 1px solid #1d4ed8;
+    color: #bfdbfe;
+    padding: 13px;
+    border-radius: 10px;
+    margin-bottom: 18px;
+}}
+
+.warning {{
+    background: #451a03;
+    border: 1px solid #92400e;
+    color: #fed7aa;
+    padding: 13px;
+    border-radius: 10px;
+    margin-bottom: 18px;
+}}
+
+table {{
+    width: 100%;
+    border-collapse: collapse;
+}}
+
+th,
+td {{
+    text-align: left;
+    padding: 11px;
+    border-bottom: 1px solid #1e293b;
+}}
+
+th {{
+    color: #94a3b8;
+    font-size: 12px;
+}}
+
+@media (
+    max-width: 800px
+) {{
+
+    .sidebar {{
+        position: static;
+        width: 100%;
+        height: auto;
+    }}
+
+    .layout {{
+        display: block;
+    }}
+
+    .main {{
+        margin-left: 0;
+        width: 100%;
+        padding: 18px;
+    }}
+
+    .topbar {{
+        flex-direction: column;
+        align-items: stretch;
+    }}
+
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="layout">
+
+{navigation}
+
+<main class="main">
+
+{body}
+
+</main>
+
+</div>
+
+</body>
+
+</html>
+"""
+
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+def dashboard_guild_from_id(
+    guild_id
+):
+
+    try:
+
+        return bot.get_guild(
+            int(guild_id)
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        return None
+
+
+def dashboard_guild_select(
+    selected=None
+):
+
+    options = []
+
+    for guild in bot.guilds:
+
+        selected_text = (
+            " selected"
+            if selected
+            and int(selected) == guild.id
+            else ""
+        )
+
+        options.append(
+            f"""
+<option value="{guild.id}"{selected_text}>
+{html.escape(guild.name)}
+</option>
+"""
+        )
+
+    return "".join(options)
+
+
+def dashboard_run(coro):
+
+    future = asyncio.run_coroutine_threadsafe(
+        coro,
+        bot.loop
+    )
+
+    return future.result(
+        timeout=30
+    )
+
+
+# ============================================================
+# MODERATION COROUTINES
+# ============================================================
+
+async def dashboard_ban(
+    guild,
+    user_id,
+    reason
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    try:
+
+        await safe_dm(
+            user,
+            discord.Embed(
+                title=f"{premium_emoji(interaction.guild, 'ban')} You were banned",
+                description=(
+                    f'You were banned from '
+                    f'**{guild.name}** for "{reason}".'
+                ),
+                color=discord.Color.red()
+            )
+        )
+
+        await user.ban(
+            reason=reason
+        )
+
+        await send_log(
+            guild,
+            f"{premium_emoji(interaction.guild, 'ban')} Member Banned",
+            (
+                f"**Member:** {user.mention}\n"
+                f"**Reason:** {reason}\n"
+                "**Source:** Dashboard"
+            ),
+            discord.Color.red()
+        )
+
+        return True, "Member banned successfully."
+
+    except discord.Forbidden:
+
+        return False, "I do not have permission to ban that member."
+
+    except discord.HTTPException as error:
+
+        return False, str(error)
+
+
+async def dashboard_kick(
+    guild,
+    user_id,
+    reason
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    try:
+
+        await safe_dm(
+            user,
+            discord.Embed(
+                title="👢 You were kicked",
+                description=(
+                    f'You were kicked from '
+                    f'**{guild.name}** for "{reason}".'
+                ),
+                color=discord.Color.orange()
+            )
+        )
+
+        await user.kick(
+            reason=reason
+        )
+
+        await send_log(
+            guild,
+            "👢 Member Kicked",
+            (
+                f"**Member:** {user.mention}\n"
+                f"**Reason:** {reason}\n"
+                "**Source:** Dashboard"
+            ),
+            discord.Color.orange()
+        )
+
+        return True, "Member kicked successfully."
+
+    except discord.Forbidden:
+
+        return False, "I do not have permission to kick that member."
+
+    except discord.HTTPException as error:
+
+        return False, str(error)
+
+
+async def dashboard_warn(
+    guild,
+    user_id,
+    reason,
+    moderator_id
+):
+
+    user = guild.get_member(
+        int(user_id)
+    )
+
+    if user is None:
+        return False, "Member not found."
+
+    warnings = get_guild_data(
+        "warnings",
+        guild.id
+    )
+
+    uid = str(
+        user.id
+    )
+
+    warnings.setdefault(
+        uid,
+        []
+    )
+
+    warnings[uid].append(
+        {
+            "reason": reason,
+            "moderator": int(moderator_id),
+            "timestamp": int(
+                datetime.now(
+                    timezone.utc
+                ).timestamp()
+            ),
+        }
+    )
+
+    save_database()
+
+    await safe_dm(
+        user,
+        discord.Embed(
+            title=f"{premium_emoji(interaction.guild, 'warn')} You were warned",
+            description=(
+                f'You were warned in '
+                f'**{guild.name}** for "{reason}".'
+            ),
+            color=discord.Color.orange()
+        )
+    )
+
+    await send_log(
+        guild,
+        f"{premium_emoji(interaction.guild, 'warn')} Member Warned",
+        (
+            f"**Member:** {user.mention}\n"
+            f"**Reason:** {reason}\n"
+            "**Source:** Dashboard"
+        ),
+        discord.Color.orange()
+    )
+
+    return True, "Member warned successfully."
+
+
+# ============================================================
+# GIVEAWAY COROUTINE
+# ============================================================
+
+async def dashboard_create_giveaway(
+    guild,
+    channel,
+    prize,
+    duration,
+    winners,
+    host
+):
+
+    seconds = duration_parser(
+        duration
+    )
+
+    if (
+        seconds is None
+        or seconds < 60
+        or seconds > 365 * 86400
+    ):
+
+        return False, "Invalid duration."
+
+    if winners < 1 or winners > 100:
+
+        return False, "Winners must be between 1 and 100."
+
+    data = {
+
+        "guild_id":
+            guild.id,
+
+        "channel_id":
+            channel.id,
+
+        "prize":
+            prize,
+
+        "winners":
+            winners,
+
+        "host_id":
+            guild.me.id,
+
+        "host_text":
+            host,
+
+        "description":
+            None,
+
+        "image":
+            None,
+
+        "thumbnail":
+            None,
+
+        "required_role_id":
+            None,
+
+        "blacklisted_role_id":
+            None,
+
+        "extra_role_id":
+            None,
+
+        "extra_entries":
+            0,
+
+        "min_account_age_days":
+            0,
+
+        "min_server_days":
+            0,
+
+        "winner_dm":
+            None,
+
+        "entry_confirmation":
+            "You entered the giveaway! 🎉",
+
+        "entries":
+            [],
+
+        "winners_selected":
+            [],
+
+        "end_time":
+            datetime.now(
+                timezone.utc
+            ).timestamp() + seconds,
+
+        "ended":
+            False,
+
+        "paused":
+            False,
+
+        "duration":
+            duration,
+    }
+
+    message = await channel.send(
         embed=create_giveaway_embed(
-            giveaway_data
+            data
         ),
         view=GiveawayView()
     )
 
     db["giveaways"][
         str(message.id)
-    ] = giveaway_data
+    ] = data
 
     save_database()
 
@@ -3244,506 +3093,1832 @@ async def giveaway_start(
         message.id
     )
 
-    await interaction.edit_original_response(
-        embed=success_embed(
-            "Giveaway Started",
-            (
-                f"Your giveaway has been created.\n\n"
-                f"**Message ID:** `{message.id}`"
-            )
-        )
-    )
-
     await send_log(
-        interaction.guild,
+        guild,
         "🎉 Giveaway Started",
         (
             f"**Prize:** {prize}\n"
             f"**Winners:** {winners}\n"
-            f"**Duration:** `{duration}`\n"
-            f"**Host:** {interaction.user.mention}\n"
-            f"**Message ID:** `{message.id}`"
+            f"**Duration:** {duration}\n"
+            "**Source:** Dashboard"
         ),
         discord.Color.gold()
     )
 
+    return True, (
+        f"Giveaway created in "
+        f"{channel.mention}."
+    )
 
-@giveaway_group.command(
-    name="end",
-    description="End a giveaway"
-)
-@app_commands.describe(
-    message_id="Giveaway message ID"
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_end(
-    interaction,
-    message_id: str
+
+# ============================================================
+# DASHBOARD HANDLER
+# ============================================================
+
+class DashboardHandler(
+    BaseHTTPRequestHandler
 ):
 
-    giveaway = db["giveaways"].get(
-        message_id
-    )
+    def _auth_ok(self):
 
-    if not giveaway:
-
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Giveaway Not Found",
-                "I couldn't find a giveaway with that message ID."
-            ),
-            ephemeral=True
+        query = parse_qs(
+            urlparse(
+                self.path
+            ).query
         )
 
-    if giveaway.get("ended"):
-
-        return await interaction.response.send_message(
-            embed=warning_embed(
-                "Already Ended",
-                "This giveaway has already ended."
-            ),
-            ephemeral=True
+        return (
+            query.get(
+                "key",
+                [None]
+            )[0]
+            == DASHBOARD_PASSWORD
         )
 
-    await interaction.response.defer()
+    def _send(
+        self,
+        status,
+        body,
+        content_type="text/html; charset=utf-8"
+    ):
 
-    winners = await finish_giveaway(
-        message_id
-    )
+        data = body.encode(
+            "utf-8"
+        )
 
-    if winners is None:
+        self.send_response(
+            status
+        )
 
-        return await interaction.followup.send(
-            embed=error_embed(
-                "Unable To End",
-                "The giveaway could not be ended."
+        self.send_header(
+            "Content-Type",
+            content_type
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(len(data))
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            data
+        )
+
+    def _redirect(
+        self,
+        location
+    ):
+
+        self.send_response(
+            302
+        )
+
+        self.send_header(
+            "Location",
+            location
+        )
+
+        self.end_headers()
+
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
+
+    def do_GET(self):
+
+        path = urlparse(
+            self.path
+        ).path
+
+        # UptimeRobot
+        if path == "/health":
+
+            return self._send(
+                200,
+                "OK",
+                "text/plain"
+            )
+
+        if not self._auth_ok():
+
+            return self._send(
+                401,
+                "Unauthorized. Add ?key=YOUR_DASHBOARD_PASSWORD"
+            )
+
+        query = parse_qs(
+            urlparse(
+                self.path
+            ).query
+        )
+
+        guild_id = (
+            query.get(
+                "guild_id",
+                [None]
+            )[0]
+        )
+
+        guild = (
+            dashboard_guild_from_id(
+                guild_id
+            )
+            if guild_id
+            else (
+                bot.guilds[0]
+                if bot.guilds
+                else None
             )
         )
 
-    await interaction.followup.send(
-        embed=success_embed(
-            "Giveaway Ended",
-            f"Giveaway `{message_id}` has been ended."
+        # ====================================================
+        # OVERVIEW
+        # ====================================================
+
+        if path in (
+            "/",
+            "/dashboard"
+        ):
+
+            guild_count = len(
+                bot.guilds
+            )
+
+            total_members = sum(
+                guild.member_count or 0
+                for guild in bot.guilds
+            )
+
+            total_giveaways = sum(
+                len(data)
+                for data in db.get(
+                    "giveaways",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            total_tickets = sum(
+                len(data)
+                for data in db.get(
+                    "tickets",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            total_responders = sum(
+                len(data)
+                for data in db.get(
+                    "autoresponders",
+                    {}
+                ).values()
+                if isinstance(
+                    data,
+                    dict
+                )
+            )
+
+            selected = (
+                guild.id
+                if guild
+                else ""
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Dashboard
+</div>
+
+<div class="page-subtitle">
+Manage Visto Bot from one place.
+</div>
+
+</div>
+
+<select class="server-select"
+onchange="location='/?key={html.escape(DASHBOARD_PASSWORD)}&guild_id='+this.value">
+
+{dashboard_guild_select(selected)}
+
+</select>
+
+</div>
+
+<div class="stats-grid">
+
+<div class="stat-card">
+<div class="stat-label">Servers</div>
+<div class="stat-value">
+{guild_count}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Members</div>
+<div class="stat-value">
+{total_members:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Giveaways</div>
+<div class="stat-value">
+{total_giveaways}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Tickets</div>
+<div class="stat-value">
+{total_tickets}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">Autoresponders</div>
+<div class="stat-value">
+{total_responders}
+</div>
+</div>
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+
+<h2>⚡ Quick Actions</h2>
+
+<p class="muted">
+Use the sections on the left to manage your server.
+</p>
+
+<a class="btn"
+href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
+🎉 Create Giveaway
+</a>
+
+<a class="btn btn-secondary"
+href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
+🛡️ Moderation
+</a>
+
+</div>
+
+<div class="card">
+
+<h2>🟢 Bot Status</h2>
+
+<p>
+<strong>Online:</strong>
+✅
+</p>
+
+<p>
+<strong>Bot:</strong>
+Visto Bot
+</p>
+
+<p>
+<strong>Connected Guilds:</strong>
+{guild_count}
+</p>
+
+<p>
+<strong>Health:</strong>
+<a href="/health">OK</a>
+</p>
+
+</div>
+
+</div>
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Dashboard",
+                    body,
+                    selected
+                )
+            )
+
+        # ====================================================
+        # SETTINGS
+        # ====================================================
+
+        if path == "/settings":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            settings = get_guild_data(
+                "settings",
+                guild.id
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Server Settings
+</div>
+
+<div class="page-subtitle">
+Configure Visto Bot for {html.escape(guild.name)}
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<form method="POST"
+action="/settings?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+General Message Channel ID
+</label>
+
+<input
+name="general_channel"
+value="{settings.get('general_channel', GENERAL_CHANNEL_ID)}"
+>
+
+<label>
+Log Channel ID
+</label>
+
+<input
+name="log_channel"
+value="{settings.get('log_channel', '')}"
+>
+
+<label>
+Buy Ticket Category ID
+</label>
+
+<input
+name="buy_category"
+value="{settings.get('ticket_buy_category', BUY_CATEGORY_ID)}"
+>
+
+<label>
+Claim Ticket Category ID
+</label>
+
+<input
+name="claim_category"
+value="{settings.get('ticket_claim_category', CLAIM_CATEGORY_ID)}"
+>
+
+<label>
+Support Ticket Category ID
+</label>
+
+<input
+name="support_category"
+value="{settings.get('ticket_support_category', SUPPORT_CATEGORY_ID)}"
+>
+
+<label>
+Ticket Staff Role ID
+</label>
+
+<input
+name="staff_role"
+value="{settings.get('ticket_staff_role', TICKET_STAFF_ROLE_ID)}"
+>
+
+<button
+class="btn-success">
+Save Settings
+</button>
+
+</form>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Server Settings",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # MODERATION
+        # ====================================================
+
+        if path == "/moderation":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            members = sorted(
+                guild.members,
+                key=lambda m:
+                    m.display_name.lower()
+            )
+
+            member_options = "".join(
+                f'<option value="{m.id}">'
+                f'{html.escape(m.display_name)}'
+                f' ({m.id})'
+                f'</option>'
+                for m in members
+                if not m.bot
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Moderation
+</div>
+
+<div class="page-subtitle">
+Manage members without opening Discord.
+</div>
+
+</div>
+
+</div>
+
+<div class="grid">
+
+<div class="card">
+
+<h2>🔨 Ban</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="ban"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Reason for ban..."
+></textarea>
+
+<button class="btn-danger">
+Ban Member
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>👢 Kick</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="kick"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Reason for kick..."
+></textarea>
+
+<button class="btn-danger">
+Kick Member
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>⚠️ Warn</h2>
+
+<form method="POST"
+action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<input
+type="hidden"
+name="action"
+value="warn"
+>
+
+<label>
+Member
+</label>
+
+<select name="user_id">
+{member_options}
+</select>
+
+<label>
+Reason
+</label>
+
+<textarea
+name="reason"
+required
+placeholder="Warning reason..."
+></textarea>
+
+<button>
+Warn Member
+</button>
+
+</form>
+
+</div>
+
+</div>
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Moderation",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # GIVEAWAYS
+        # ====================================================
+
+        if path == "/giveaways":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            channels = "".join(
+                f'<option value="{c.id}">'
+                f'#{html.escape(c.name)}'
+                f'</option>'
+                for c in guild.text_channels
+            )
+
+            giveaway_rows = []
+
+            for message_id, data in db.get(
+                "giveaways",
+                {}
+            ).items():
+
+                if int(
+                    data.get(
+                        "guild_id",
+                        0
+                    )
+                ) != guild.id:
+
+                    continue
+
+                status = (
+                    "Ended"
+                    if data.get("ended")
+                    else "Active"
+                )
+
+                giveaway_rows.append(
+                    f"""
+<tr>
+
+<td>
+{html.escape(
+    str(data.get("prize", "Unknown"))
+)}
+</td>
+
+<td>
+{data.get("winners", 0)}
+</td>
+
+<td>
+{status}
+</td>
+
+<td>
+<code>{message_id}</code>
+</td>
+
+</tr>
+"""
+                )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Giveaways
+</div>
+
+<div class="page-subtitle">
+Create and manage giveaways from Visto Dashboard.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>🎉 Create Giveaway</h2>
+
+<form method="POST"
+action="/giveaway?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Prize
+</label>
+
+<input
+name="prize"
+required
+placeholder="Nitro, Robux, Money, etc."
+>
+
+<label>
+Duration
+</label>
+
+<input
+name="duration"
+required
+placeholder="2h 30m"
+>
+
+<label>
+Winners
+</label>
+
+<input
+type="number"
+name="winners"
+value="1"
+min="1"
+max="100"
+required
+>
+
+<label>
+Giveaway Channel
+</label>
+
+<select name="channel_id">
+{channels}
+</select>
+
+<label>
+Host
+</label>
+
+<input
+name="host"
+placeholder="Giveaway Creator"
+>
+
+<button
+class="btn-success">
+🎉 Start Giveaway
+</button>
+
+</form>
+
+</div>
+
+<div class="card">
+
+<h2>📋 Existing Giveaways</h2>
+
+<table>
+
+<thead>
+
+<tr>
+<th>Prize</th>
+<th>Winners</th>
+<th>Status</th>
+<th>Message ID</th>
+</tr>
+
+</thead>
+
+<tbody>
+
+{"".join(giveaway_rows) or
+"<tr><td colspan='4'>No giveaways yet.</td></tr>"}
+
+</tbody>
+
+</table>
+
+<hr>
+
+<form method="POST"
+action="/giveaway/manage?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Message ID
+</label>
+
+<input
+name="message_id"
+required
+placeholder="Giveaway message ID"
+>
+
+<label>
+Action
+</label>
+
+<select name="action">
+
+<option value="end">
+End Giveaway
+</option>
+
+<option value="reroll">
+Reroll Winners
+</option>
+
+<option value="delete">
+Delete Giveaway Data
+</option>
+
+</select>
+
+<button>
+Apply
+</button>
+
+</form>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Giveaways",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # TICKETS
+        # ====================================================
+
+        if path == "/tickets":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            tickets = db.get(
+                "tickets",
+                {}
+            ).get(
+                str(guild.id),
+                {}
+            )
+
+            rows = []
+
+            for channel_id, ticket in tickets.items():
+
+                rows.append(
+                    f"""
+<tr>
+
+<td>
+<code>{channel_id}</code>
+</td>
+
+<td>
+{html.escape(
+    str(ticket.get("type", "support"))
+)}
+</td>
+
+<td>
+{
+    "Closed"
+    if ticket.get("closed")
+    else "Open"
+}
+</td>
+
+<td>
+{ticket.get("owner_id", "Unknown")}
+</td>
+
+</tr>
+"""
+                )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Tickets
+</div>
+
+<div class="page-subtitle">
+Monitor your Buy, Claim and Support tickets.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<table>
+
+<thead>
+
+<tr>
+<th>Channel</th>
+<th>Type</th>
+<th>Status</th>
+<th>Owner</th>
+</tr>
+
+</thead>
+
+<tbody>
+
+{"".join(rows) or
+"<tr><td colspan='4'>No tickets recorded.</td></tr>"}
+
+</tbody>
+
+</table>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Tickets",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # AUTORESPONDERS
+        # ====================================================
+
+        if path == "/autoresponders":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            responders = get_guild_data(
+                "autoresponders",
+                guild.id
+            )
+
+            rows = "".join(
+                f"""
+<tr>
+<td>{html.escape(trigger)}</td>
+<td>{html.escape(response)}</td>
+</tr>
+"""
+                for trigger, response
+                in responders.items()
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Autoresponders
+</div>
+
+<div class="page-subtitle">
+Create automatic responses without commands.
+</div>
+
+</div>
+
+</div>
+
+<div class="card">
+
+<form method="POST"
+action="/autoresponder?key={html.escape(DASHBOARD_PASSWORD)}">
+
+<input
+type="hidden"
+name="guild_id"
+value="{guild.id}"
+>
+
+<label>
+Trigger
+</label>
+
+<input
+name="trigger"
+required
+placeholder="hello"
+>
+
+<label>
+Response
+</label>
+
+<textarea
+name="response"
+required
+placeholder="Hey! 👋"
+></textarea>
+
+<button class="btn-success">
+Add Autoresponder
+</button>
+
+</form>
+
+<hr>
+
+<table>
+
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Response</th>
+</tr>
+</thead>
+
+<tbody>
+
+{rows or
+"<tr><td colspan='2'>None configured.</td></tr>"}
+
+</tbody>
+
+</table>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Autoresponders",
+                    body,
+                    guild.id
+                )
+            )
+
+        # ====================================================
+        # STATISTICS
+        # ====================================================
+
+        if path == "/statistics":
+
+            if guild is None:
+
+                return self._send(
+                    400,
+                    "No guild selected."
+                )
+
+            messages = get_guild_data(
+                "messages",
+                guild.id
+            )
+
+            invites = get_guild_data(
+                "invites",
+                guild.id
+            )
+
+            total_messages = sum(
+                int(v)
+                for v in messages.values()
+            )
+
+            total_invites = sum(
+                int(
+                    get_invite_stats(
+                        guild.id,
+                        uid
+                    ).get(
+                        "total",
+                        0
+                    )
+                )
+                for uid in invites
+            )
+
+            body = f"""
+
+<div class="topbar">
+
+<div>
+
+<div class="page-title">
+Statistics
+</div>
+
+<div class="page-subtitle">
+Live statistics for {html.escape(guild.name)}
+</div>
+
+</div>
+
+</div>
+
+<div class="stats-grid">
+
+<div class="stat-card">
+<div class="stat-label">
+Total Messages
+</div>
+
+<div class="stat-value">
+{total_messages:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">
+Active Invites
+</div>
+
+<div class="stat-value">
+{total_invites:,}
+</div>
+</div>
+
+<div class="stat-card">
+<div class="stat-label">
+Tracked Members
+</div>
+
+<div class="stat-value">
+{len(messages):,}
+</div>
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>📌 Message Channel</h2>
+
+<p class="muted">
+
+Only the configured General channel should contribute
+to message statistics.
+
+</p>
+
+<p>
+
+<strong>ID:</strong>
+
+<code>
+{GENERAL_CHANNEL_ID}
+</code>
+
+</p>
+
+</div>
+
+"""
+
+            return self._send(
+                200,
+                dashboard_page(
+                    "Statistics",
+                    body,
+                    guild.id
+                )
+            )
+
+        return self._send(
+            404,
+            "Page not found."
         )
-    )
 
+    # --------------------------------------------------------
+    # POST
+    # --------------------------------------------------------
 
-@giveaway_group.command(
-    name="reroll",
-    description="Reroll a giveaway"
-)
-@app_commands.describe(
-    message_id="Ended giveaway message ID"
-)
-@app_commands.checks.has_permissions(
-    manage_guild=True
-)
-async def giveaway_reroll(
-    interaction,
-    message_id: str
-):
+    def do_POST(self):
 
-    giveaway = db["giveaways"].get(
-        message_id
-    )
+        if not self._auth_ok():
 
-    if not giveaway:
+            return self._send(
+                401,
+                "Unauthorized"
+            )
 
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "Giveaway Not Found",
-                "I couldn't find that giveaway."
-            ),
-            ephemeral=True
+        length = int(
+            self.headers.get(
+                "Content-Length",
+                "0"
+            )
         )
 
-    if not giveaway.get("ended"):
-
-        return await interaction.response.send_message(
-            embed=warning_embed(
-                "Giveaway Still Active",
-                "You can only reroll an ended giveaway."
-            ),
-            ephemeral=True
+        raw = self.rfile.read(
+            length
+        ).decode(
+            "utf-8"
         )
 
-    entries = list(
-        giveaway.get("entries", [])
-    )
+        data = {
+            key: values[0]
+            for key, values
+            in parse_qs(raw).items()
+            if values
+        }
 
-    if not entries:
+        path = urlparse(
+            self.path
+        ).path
 
-        return await interaction.response.send_message(
-            embed=error_embed(
-                "No Entries",
-                "There are no entries to reroll."
-            ),
-            ephemeral=True
-        )
+        try:
 
-    previous_winners = set(
-        giveaway.get(
-            "winners_selected",
-            []
-        )
-    )
+            guild = dashboard_guild_from_id(
+                data.get(
+                    "guild_id"
+                )
+            )
 
-    available = [
-        user_id
-        for user_id in entries
-        if user_id not in previous_winners
-    ]
+            if guild is None:
 
-    if not available:
-        available = entries
+                return self._send(
+                    400,
+                    "Invalid guild."
+                )
 
-    winner_count = min(
-        giveaway["winners"],
-        len(available)
-    )
+            # =================================================
+            # SETTINGS
+            # =================================================
 
-    winners = random.sample(
-        available,
-        winner_count
-    )
+            if path == "/settings":
 
-    giveaway["winners_selected"] = winners
-    giveaway["rerolled"] = True
+                dashboard_backup_database()
 
-    save_database()
+                settings = get_guild_data(
+                    "settings",
+                    guild.id
+                )
 
-    mentions = " ".join(
-        f"<@{user_id}>"
-        for user_id in winners
-    )
+                mapping = {
 
-    embed = discord.Embed(
-        title="🎉 GIVEAWAY REROLLED",
-        description=(
-            f"**Prize:** {giveaway['prize']}\n\n"
-            f"**New Winner(s):**\n{mentions}\n\n"
-            "Congratulations! 🎊"
-        ),
-        color=discord.Color.gold()
-    )
+                    "general_channel":
+                        "general_channel",
 
-    await interaction.response.send_message(
-        embed=embed
-    )
+                    "log_channel":
+                        "log_channel",
 
-    guild = interaction.guild
+                    "buy_category":
+                        "ticket_buy_category",
 
-    await send_log(
-        guild,
-        "🔄 Giveaway Rerolled",
-        (
-            f"**Prize:** {giveaway['prize']}\n"
-            f"**New Winner(s):** {mentions}\n"
-            f"**Moderator:** {interaction.user.mention}"
-        ),
-        discord.Color.gold()
-    )
+                    "claim_category":
+                        "ticket_claim_category",
 
+                    "support_category":
+                        "ticket_support_category",
 
-bot.tree.add_command(
-    giveaway_group
-)
+                    "staff_role":
+                        "ticket_staff_role",
+                }
 
+                for form_key, db_key in mapping.items():
 
-# ============================================================
-# SAY COMMAND
-# ============================================================
+                    value = (
+                        data.get(
+                            form_key,
+                            ""
+                        ).strip()
+                    )
 
-@bot.command(name="say")
-@commands.has_permissions(manage_messages=True)
-async def say(ctx, *, message=None):
-    if not message:
-        return await ctx.send(embed=error_embed("Usage", "Use `.say <message>`."), delete_after=5)
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-    await ctx.send(f"Bot: {message}")
+                    if not value:
+                        continue
 
+                    settings[db_key] = int(
+                        value
+                    )
 
-# ============================================================
-# AUTORESPONDER
-# ============================================================
+                save_database()
 
-@bot.tree.command(name="autoresponder_add", description="Add an autoresponder")
-@app_commands.describe(trigger="Message trigger", response="Bot response")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def autoresponder_add(interaction, trigger: str, response: str):
-    trigger = trigger.strip().lower()
-    if not trigger or len(trigger) > 100:
-        return await interaction.response.send_message(embed=error_embed("Invalid Trigger", "Trigger must be 1-100 characters."), ephemeral=True)
-    responders = get_guild_data("autoresponders", interaction.guild.id)
-    responders[trigger] = response
-    save_database()
-    await interaction.response.send_message(embed=success_embed("Autoresponder Added", f"`{trigger}` will now respond automatically."))
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Saved",
+                        """
+<div class="card">
 
-@bot.tree.command(name="autoresponder_remove", description="Remove an autoresponder")
-@app_commands.describe(trigger="Trigger to remove")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def autoresponder_remove(interaction, trigger: str):
-    trigger = trigger.strip().lower()
-    responders = get_guild_data("autoresponders", interaction.guild.id)
-    if trigger not in responders:
-        return await interaction.response.send_message(embed=error_embed("Not Found", f"No autoresponder exists for `{trigger}`."), ephemeral=True)
-    del responders[trigger]
-    save_database()
-    await interaction.response.send_message(embed=success_embed("Autoresponder Removed", f"Removed `{trigger}`."))
+<h2>✅ Settings Saved</h2>
 
-@bot.tree.command(name="autoresponder_list", description="List autoresponders")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def autoresponder_list(interaction):
-    responders = get_guild_data("autoresponders", interaction.guild.id)
-    if not responders:
-        return await interaction.response.send_message(embed=info_embed("Autoresponders", "No autoresponders are configured."), ephemeral=True)
-    lines = [f"**{i}.** `{trigger}` → {discord.utils.escape_markdown(response)[:150]}" for i, (trigger, response) in enumerate(responders.items(), 1)]
-    await interaction.response.send_message(embed=info_embed("Autoresponders", "\n".join(lines[:25])))
+<p>
+Your server settings were updated.
+Your existing bot data was not reset.
+</p>
 
+<a class="btn"
+href="?key=__KEY__">
+Back to Dashboard
+</a>
 
-# ============================================================
-# ERROR HANDLING
-# ============================================================
+</div>
+""".replace(
+                            "__KEY__",
+                            html.escape(
+                                DASHBOARD_PASSWORD
+                            )
+                        )
+                    )
+                )
 
+            # =================================================
+            # MODERATION
+            # =================================================
 
-@bot.event
-async def on_command_error(
-    ctx,
-    error
-):
+            if path == "/moderation":
 
-    if isinstance(
-        error,
-        commands.CommandNotFound
+                action = data.get(
+                    "action"
+                )
+
+                user_id = data.get(
+                    "user_id"
+                )
+
+                reason = (
+                    data.get(
+                        "reason"
+                    )
+                    or
+                    "No reason provided"
+                )
+
+                if action == "ban":
+
+                    success, message = dashboard_run(
+                        dashboard_ban(
+                            guild,
+                            user_id,
+                            reason
+                        )
+                    )
+
+                elif action == "kick":
+
+                    success, message = dashboard_run(
+                        dashboard_kick(
+                            guild,
+                            user_id,
+                            reason
+                        )
+                    )
+
+                elif action == "warn":
+
+                    success, message = dashboard_run(
+                        dashboard_warn(
+                            guild,
+                            user_id,
+                            reason,
+                            guild.owner_id
+                        )
+                    )
+
+                else:
+
+                    return self._send(
+                        400,
+                        "Unknown moderation action."
+                    )
+
+                color = (
+                    "✅"
+                    if success
+                    else
+                    "❌"
+                )
+
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Moderation Result",
+                        f"""
+<div class="card">
+
+<h2>
+{color} Moderation Result
+</h2>
+
+<p>
+{html.escape(message)}
+</p>
+
+<a class="btn"
+href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={guild.id}">
+Back to Moderation
+</a>
+
+</div>
+"""
+                    )
+                )
+
+            # =================================================
+            # GIVEAWAY
+            # =================================================
+
+            if path == "/giveaway":
+
+                channel = guild.get_channel(
+                    int(
+                        data.get(
+                            "channel_id"
+                        )
+                    )
+                )
+
+                if not isinstance(
+                    channel,
+                    discord.TextChannel
+                ):
+
+                    return self._send(
+                        400,
+                        "Invalid giveaway channel."
+                    )
+
+                prize = data.get(
+                    "prize",
+                    ""
+                ).strip()
+
+                duration = data.get(
+                    "duration",
+                    ""
+                ).strip()
+
+                try:
+
+                    winners = int(
+                        data.get(
+                            "winners",
+                            "1"
+                        )
+                    )
+
+                except ValueError:
+
+                    return self._send(
+                        400,
+                        "Invalid winners amount."
+                    )
+
+                host = (
+                    data.get(
+                        "host"
+                    )
+                    or
+                    "Giveaway Creator"
+                )
+
+                success, message = dashboard_run(
+
+                    dashboard_create_giveaway(
+
+                        guild,
+                        channel,
+                        prize,
+                        duration,
+                        winners,
+                        host
+                    )
+                )
+
+                return self._send(
+                    200,
+                    dashboard_page(
+                        "Giveaway Result",
+                        f"""
+<div class="card">
+
+<h2>
+{"🎉" if success else "❌"}
+Giveaway Result
+</h2>
+
+<p>
+{html.escape(message)}
+</p>
+
+<a class="btn"
+href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={guild.id}">
+Back to Giveaways
+</a>
+
+</div>
+"""
+                    )
+                )
+
+            # =================================================
+            # GIVEAWAY MANAGEMENT
+            # =================================================
+
+            if path == "/giveaway/manage":
+
+                message_id = str(
+                    data.get(
+                        "message_id"
+                    )
+                )
+
+                action = data.get(
+                    "action"
+                )
+
+                giveaway = db[
+                    "giveaways"
+                ].get(
+                    message_id
+                )
+
+                if not giveaway:
+
+                    return self._send(
+                        404,
+                        "Giveaway not found."
+                    )
+
+                if action == "end":
+
+                    dashboard_run(
+                        finish_giveaway(
+                            message_id
+                        )
+                    )
+
+                elif action == "reroll":
+
+                    entries = list(giveaway.get("entries", []))
+
+                    if entries:
+
+                        winners = choose_weighted_winners(
+                            entries,
+                            giveaway["winners"]
+                        )
+
+                        giveaway[
+                            "winners_selected"
+                        ] = winners
+
+                        save_database()
+
+                elif action == "delete":
+
+                    db[
+                        "giveaways"
+                    ].pop(
+                        message_id,
+                        None
+                    )
+
+                    save_database()
+
+                return self._redirect(
+                    f"/giveaways?key="
+                    f"{DASHBOARD_PASSWORD}"
+                    f"&guild_id={guild.id}"
+                )
+
+            # =================================================
+            # AUTORESPONDER
+            # =================================================
+
+            if path == "/autoresponder":
+
+                dashboard_backup_database()
+
+                trigger = (
+                    data.get(
+                        "trigger",
+                        ""
+                    )
+                    .strip()
+                    .lower()
+                )
+
+                response = (
+                    data.get(
+                        "response",
+                        ""
+                    )
+                    .strip()
+                )
+
+                if not trigger or not response:
+
+                    return self._send(
+                        400,
+                        "Trigger and response are required."
+                    )
+
+                responders = get_guild_data(
+                    "autoresponders",
+                    guild.id
+                )
+
+                responders[
+                    trigger
+                ] = response
+
+                save_database()
+
+                return self._redirect(
+                    f"/autoresponders?key="
+                    f"{DASHBOARD_PASSWORD}"
+                    f"&guild_id={guild.id}"
+                )
+
+            return self._send(
+                404,
+                "Unknown dashboard action."
+            )
+
+        except Exception as error:
+
+            print(
+                f"Dashboard POST error: {error}"
+            )
+
+            return self._send(
+                500,
+                f"Dashboard error: {html.escape(str(error))}"
+            )
+
+    def log_message(
+        self,
+        format,
+        *args
     ):
         return
 
-    if isinstance(
-        error,
-        commands.MissingPermissions
-    ):
 
-        return await ctx.send(
-            embed=error_embed(
-                "Permission Denied",
-                "You don't have permission to use this command."
-            )
+# ============================================================
+# START DASHBOARD
+# ============================================================
+
+def start_dashboard():
+
+    global _dashboard_server
+
+    if _dashboard_server is not None:
+        return
+
+    try:
+
+        _dashboard_server = ThreadingHTTPServer(
+
+            (
+                DASHBOARD_HOST,
+                DASHBOARD_PORT
+            ),
+
+            DashboardHandler
         )
 
-    if isinstance(
-        error,
-        commands.MissingRequiredArgument
-    ):
-
-        return await ctx.send(
-            embed=error_embed(
-                "Missing Argument",
-                "You're missing a required argument."
-            )
+        thread = threading.Thread(
+            target=_dashboard_server.serve_forever,
+            daemon=True
         )
 
-    print(
-        f"Prefix command error: {error}"
-    )
+        thread.start()
+
+        print(
+            f"Visto Dashboard running on "
+            f"port {DASHBOARD_PORT}"
+        )
+
+    except Exception as error:
+
+        print(
+            f"Dashboard failed to start: {error}"
+        )
+
+# ============================================================
+# COMMAND ERRORS
+# ============================================================
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.MissingPermissions):
+        return await ctx.send(embed=error_embed("Permission Denied", "You don't have permission to use this command."))
+    if isinstance(error, commands.MissingRequiredArgument):
+        return await ctx.send(embed=error_embed("Missing Argument", "You're missing a required argument."))
+    print(f"Prefix command error: {error}")
 
 
 @bot.tree.error
-async def on_app_command_error(
-    interaction,
-    error
-):
-
-    if isinstance(
-        error,
-        app_commands.errors.MissingPermissions
-    ):
-
-        embed = error_embed(
-            "Permission Denied",
-            "You don't have permission to use this command."
-        )
-
+async def on_app_command_error(interaction, error):
+    print(f"Slash command error: {error}")
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        embed = error_embed("Permission Denied", "You don't have permission to use this command.")
         if interaction.response.is_done():
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True
-            )
-
+            await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-
-            await interaction.response.send_message(
-                embed=embed,
-                ephemeral=True
-            )
-
-        return
-
-    print(
-        f"Slash command error: {error}"
-    )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ============================================================
-# SIMPLE BOT DASHBOARD
+# READY
 # ============================================================
 
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD") or secrets.token_urlsafe(18)
-DASHBOARD_HOST = "0.0.0.0"
-DASHBOARD_PORT = int(os.getenv("PORT", "10000"))
-_dashboard_server = None
+_persistent_views_registered = False
 
-
-def dashboard_page(title, body):
-    return f"""<!doctype html>
-<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>{html.escape(title)}</title>
-<style>body{{font-family:Arial,sans-serif;background:#111827;color:#f9fafb;margin:0;padding:24px}} .wrap{{max-width:1100px;margin:auto}} .card{{background:#1f2937;border:1px solid #374151;border-radius:14px;padding:18px;margin:14px 0}} input,select{{width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border-radius:8px;border:1px solid #4b5563;background:#111827;color:#fff}} button{{padding:10px 16px;border:0;border-radius:8px;background:#5865f2;color:white;cursor:pointer}} h1,h2{{margin-top:0}} .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}} .muted{{color:#9ca3af}}</style></head>
-<body><div class='wrap'>{body}</div></body></html>"""
-
-
-def dashboard_stats():
-    guild_count = len(bot.guilds)
-    tickets = sum(len(data) for data in db.get("tickets", {}).values() if isinstance(data, dict))
-    giveaways = sum(len(data) for data in db.get("giveaways", {}).values() if isinstance(data, dict))
-    responders = sum(len(data) for data in db.get("autoresponders", {}).values() if isinstance(data, dict))
-    return guild_count, tickets, giveaways, responders
-
-
-class DashboardHandler(BaseHTTPRequestHandler):
-    def _auth_ok(self):
-        query = parse_qs(urlparse(self.path).query)
-        return query.get("key", [None])[0] == DASHBOARD_PASSWORD
-
-    def _send(self, status, body, content_type="text/html; charset=utf-8"):
-        data = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        if urlparse(self.path).path == "/health":
-            return self._send(200, "OK", "text/plain")
-        if not self._auth_ok():
-            return self._send(401, "Unauthorized. Add ?key=YOUR_DASHBOARD_PASSWORD")
-
-        guild_count, tickets, giveaways, responders = dashboard_stats()
-        cards = f"""
-<h1>𖦹 D ! V ! N Σ 𖦹 Dashboard</h1>
-<p class='muted'>Bot configuration dashboard</p>
-<div class='grid'>
-<div class='card'><h2>Servers</h2><b>{guild_count}</b></div>
-<div class='card'><h2>Tickets</h2><b>{tickets}</b></div>
-<div class='card'><h2>Giveaways</h2><b>{giveaways}</b></div>
-<div class='card'><h2>Autoresponders</h2><b>{responders}</b></div>
-</div>
-<div class='card'><h2>Server Settings</h2>
-<form method='POST' action='/settings?key={html.escape(DASHBOARD_PASSWORD)}'>
-<label>Guild ID</label><input name='guild_id' required>
-<label>Log Channel ID</label><input name='log_channel'>
-<label>Buy Category ID</label><input name='buy_category'>
-<label>Claim Category ID</label><input name='claim_category'>
-<label>Support Category ID</label><input name='support_category'>
-<label>Ticket Staff Role ID</label><input name='staff_role'>
-<button>Save Settings</button>
-</form></div>
-<div class='card'><h2>Autoresponder</h2>
-<form method='POST' action='/autoresponder?key={html.escape(DASHBOARD_PASSWORD)}'>
-<label>Guild ID</label><input name='guild_id' required>
-<label>Trigger</label><input name='trigger' required>
-<label>Response</label><input name='response' required>
-<button>Save Autoresponder</button>
-</form></div>
-<div class='card'><h2>Invite Tracking</h2><p class='muted'>The bot tracks one permanent record per invited member. Rejoin is a 0/1 state and does not stack. Device/IP identity is not available through Discord's bot API.</p></div>
-"""
-        self._send(200, dashboard_page("Visto Dashboard", cards))
-
-    def do_POST(self):
-        if not self._auth_ok():
-            return self._send(401, "Unauthorized")
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8")
-        data = {k: v[0] for k, v in parse_qs(raw).items() if v}
-        path = urlparse(self.path).path
-
-        try:
-            guild_id = int(data.get("guild_id", "0"))
-        except ValueError:
-            return self._send(400, "Invalid guild ID")
-
-        if path == "/settings":
-            settings = get_guild_data("settings", guild_id)
-            for key in ("log_channel", "buy_category", "claim_category", "support_category", "staff_role"):
-                value = data.get(key, "").strip()
-                if value:
-                    try:
-                        settings_key = {
-                            "log_channel": "log_channel",
-                            "buy_category": "ticket_buy_category",
-                            "claim_category": "ticket_claim_category",
-                            "support_category": "ticket_support_category",
-                            "staff_role": "ticket_staff_role"
-                        }[key]
-                        settings[settings_key] = int(value)
-                    except ValueError:
-                        return self._send(400, f"Invalid {key}")
-            settings.setdefault("ticket_categories", {})
-            if data.get("buy_category", "").strip(): settings["ticket_categories"]["buy"] = int(data["buy_category"])
-            if data.get("claim_category", "").strip(): settings["ticket_categories"]["claim"] = int(data["claim_category"])
-            if data.get("support_category", "").strip(): settings["ticket_categories"]["support"] = int(data["support_category"])
-            save_database()
-            return self._send(200, dashboard_page("Saved", "<h1>Saved</h1><p>Settings updated.</p><a href='/'>Back</a>"))
-
-        if path == "/autoresponder":
-            trigger = data.get("trigger", "").strip().lower()
-            response = data.get("response", "").strip()
-            if not trigger or not response:
-                return self._send(400, "Trigger and response are required")
-            responders = get_guild_data("autoresponders", guild_id)
-            responders[trigger] = response
-            save_database()
-            return self._send(200, dashboard_page("Saved", "<h1>Saved</h1><p>Autoresponder updated.</p><a href='/'>Back</a>"))
-
-        return self._send(404, "Not found")
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_dashboard():
-    global _dashboard_server
-    if _dashboard_server is not None:
-        return
+@bot.event
+async def on_ready():
+    print("=" * 60)
+    print(f"Visto connected as {bot.user}")
+    print(f"Guilds: {len(bot.guilds)}")
+    print("=" * 60)
     try:
-        _dashboard_server = ThreadingHTTPServer((DASHBOARD_HOST, DASHBOARD_PORT), DashboardHandler)
-        thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
-        thread.start()
-        print(f"Dashboard running on port {DASHBOARD_PORT}")
-        if not os.getenv("DASHBOARD_PASSWORD"):
-            print(f"DASHBOARD_PASSWORD was not set. Temporary dashboard key: {DASHBOARD_PASSWORD}")
+        # Sync to the configured guild immediately so new slash commands
+        # like /delwarn and advanced /giveaway options appear without
+        # waiting for a global-command propagation delay.
+        if GUILD_ID:
+            guild_obj = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild_obj)
+            synced = await bot.tree.sync(guild=guild_obj)
+            print(f"Synced {len(synced)} slash commands to guild {GUILD_ID}.")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} global slash commands.")
     except Exception as error:
-        print(f"Dashboard failed to start: {error}")
+        print(f"Slash sync error: {error}")
+
+    await cache_all_invites()
+    # Register persistent handlers once. New messages are created with the
+    # server's premium emojis; these generic views only handle interactions
+    # after a restart.
+    global _persistent_views_registered
+    if not _persistent_views_registered:
+        view_guild = bot.guilds[0] if bot.guilds else None
+        bot.add_view(TicketPanelView(view_guild))
+        bot.add_view(TicketControlsView(view_guild))
+        bot.add_view(ClosedTicketView())
+        bot.add_view(GiveawayView(guild=view_guild))
+        _persistent_views_registered = True
+    start_dashboard()
+    await bot.change_presence(activity=discord.Game(name=".help • Visto"))
 
 
 # ============================================================
-# START BOT
+# START
 # ============================================================
-
 
 async def main():
-    start_dashboard()
     await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
-
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())

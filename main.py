@@ -9,6 +9,8 @@ import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -76,29 +78,20 @@ DEFAULT_DATABASE = {
 
 DB_FILE = "visto_data.json"
 
-# Supabase is the persistent source of truth.
-# Render Environment Variables:
-#   SUPABASE_URL
-#   SUPABASE_SECRET_KEY
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY") or ""
 SUPABASE_ROW_ID = 1
 
 DB_LOCK = threading.RLock()
 _SUPABASE_SYNC_TIMER = None
 _SUPABASE_SYNC_TIMER_LOCK = threading.RLock()
-_SUPABASE_CLIENT = None
 
 
 def _empty_database():
-    return {
-        key: {}
-        for key in DEFAULT_DATABASE
-    }
+    return {key: {} for key in DEFAULT_DATABASE}
 
 
 def _normalize_database(loaded):
-    """Keep the existing Visto db structure exactly the same."""
     if not isinstance(loaded, dict):
         loaded = {}
 
@@ -109,29 +102,99 @@ def _normalize_database(loaded):
     return loaded
 
 
-def _get_supabase_client():
-    global _SUPABASE_CLIENT
+def _supabase_headers():
+    return {
+        "apikey": SUPABASE_SECRET_KEY,
+        "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    if _SUPABASE_CLIENT is not None:
-        return _SUPABASE_CLIENT
 
-    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+def _supabase_request(method, url, payload=None, extra_headers=None):
+    headers = _supabase_headers()
+    if extra_headers:
+        headers.update(extra_headers)
+
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+
+    request = Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+
+    with urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+
+    if not raw:
         return None
 
-    if create_client is None:
-        print("[Supabase] Python package is not installed.")
-        return None
+    return json.loads(raw)
+
+
+def _supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_SECRET_KEY)
+
+
+def _test_supabase():
+    if not _supabase_enabled():
+        print(
+            "[VISTO] Supabase DISABLED: "
+            "SUPABASE_URL or SUPABASE_SECRET_KEY missing.",
+            flush=True,
+        )
+        return False
 
     try:
-        _SUPABASE_CLIENT = create_client(
-            SUPABASE_URL,
-            SUPABASE_SECRET_KEY,
+        url = (
+            f"{SUPABASE_URL}/rest/v1/"
+            f"visto_database?id=eq.{SUPABASE_ROW_ID}"
         )
-        print("[Supabase] Connected.")
-        return _SUPABASE_CLIENT
+
+        rows = _supabase_request(
+            "GET",
+            url,
+            extra_headers={
+                "Accept": "application/json",
+            },
+        )
+
+        print(
+            "[VISTO] Supabase connection: OK",
+            flush=True,
+        )
+
+        return True
+
+    except HTTPError as error:
+        body = ""
+        try:
+            body = error.read().decode("utf-8")
+        except Exception:
+            pass
+
+        print(
+            f"[VISTO] Supabase HTTP ERROR {error.code}: {body}",
+            flush=True,
+        )
+        return False
+
+    except URLError as error:
+        print(
+            f"[VISTO] Supabase URL ERROR: {error}",
+            flush=True,
+        )
+        return False
+
     except Exception as error:
-        print(f"[Supabase] Connection error: {error}")
-        return None
+        print(
+            f"[VISTO] Supabase ERROR: {type(error).__name__}: {error}",
+            flush=True,
+        )
+        return False
 
 
 def _load_local_database():
@@ -139,100 +202,127 @@ def _load_local_database():
         return None
 
     try:
-        with open(
-            DB_FILE,
-            "r",
-            encoding="utf-8",
-        ) as file:
-            return _normalize_database(
-                json.load(file)
-            )
+        with open(DB_FILE, "r", encoding="utf-8") as file:
+            return _normalize_database(json.load(file))
     except Exception as error:
-        print(f"[Database] Local JSON load error: {error}")
+        print(
+            f"[VISTO] Local JSON load error: {error}",
+            flush=True,
+        )
         return None
 
 
 def _save_local_database(snapshot):
     temporary = DB_FILE + ".tmp"
 
-    with open(
-        temporary,
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            snapshot,
-            file,
-            indent=4,
-        )
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(snapshot, file, indent=4)
 
-    os.replace(
-        temporary,
-        DB_FILE,
-    )
+    os.replace(temporary, DB_FILE)
 
 
 def _load_supabase_database():
-    client = _get_supabase_client()
-
-    if client is None:
+    if not _supabase_enabled():
         return None
 
     try:
-        result = (
-            client
-            .table("visto_database")
-            .select("data")
-            .eq("id", SUPABASE_ROW_ID)
-            .limit(1)
-            .execute()
+        url = (
+            f"{SUPABASE_URL}/rest/v1/"
+            f"visto_database?id=eq.{SUPABASE_ROW_ID}"
+            f"&select=data"
         )
 
-        rows = result.data or []
+        rows = _supabase_request(
+            "GET",
+            url,
+            extra_headers={
+                "Accept": "application/json",
+            },
+        )
 
         if not rows:
+            print(
+                "[VISTO] Supabase row not found yet.",
+                flush=True,
+            )
             return None
 
         data = rows[0].get("data")
 
         if not isinstance(data, dict):
+            print(
+                "[VISTO] Supabase row exists but data is invalid.",
+                flush=True,
+            )
             return None
+
+        print(
+            "[VISTO] Database loaded from Supabase.",
+            flush=True,
+        )
 
         return _normalize_database(data)
 
     except Exception as error:
-        print(f"[Supabase] Database load error: {error}")
+        print(
+            f"[VISTO] Supabase load error: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
         return None
 
 
 def _save_supabase_now(snapshot):
-    client = _get_supabase_client()
-
-    if client is None:
+    if not _supabase_enabled():
         return False
 
     try:
-        (
-            client
-            .table("visto_database")
-            .upsert(
-                {
-                    "id": SUPABASE_ROW_ID,
-                    "data": snapshot,
-                    "updated_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                },
-                on_conflict="id",
-            )
-            .execute()
+        url = f"{SUPABASE_URL}/rest/v1/visto_database"
+
+        payload = {
+            "id": SUPABASE_ROW_ID,
+            "data": snapshot,
+            "updated_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+        }
+
+        _supabase_request(
+            "POST",
+            url,
+            payload=payload,
+            extra_headers={
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
         )
 
-        print("[Supabase] Database saved.")
+        print(
+            "[VISTO] Database saved to Supabase.",
+            flush=True,
+        )
+
         return True
 
+    except HTTPError as error:
+        body = ""
+        try:
+            body = error.read().decode("utf-8")
+        except Exception:
+            pass
+
+        print(
+            f"[VISTO] Supabase SAVE HTTP ERROR "
+            f"{error.code}: {body}",
+            flush=True,
+        )
+        return False
+
     except Exception as error:
-        print(f"[Supabase] Database save error: {error}")
+        print(
+            f"[VISTO] Supabase SAVE ERROR: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
         return False
 
 
@@ -240,18 +330,16 @@ def _supabase_sync_worker(snapshot):
     try:
         _save_supabase_now(snapshot)
     except Exception as error:
-        print(f"[Supabase] Sync worker error: {error}")
+        print(
+            f"[VISTO] Sync worker error: {error}",
+            flush=True,
+        )
 
 
 def _schedule_supabase_sync():
-    """
-    Debounced remote save.
-    This avoids sending a Supabase request for every single message
-    while still persisting changes shortly after they happen.
-    """
     global _SUPABASE_SYNC_TIMER
 
-    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+    if not _supabase_enabled():
         return
 
     with _SUPABASE_SYNC_TIMER_LOCK:
@@ -277,37 +365,32 @@ def _schedule_supabase_sync():
 
 def load_database():
     """
-    Startup order:
-      1. Load Supabase if the persistent row exists.
-      2. If Supabase is empty, use the local JSON backup if present.
-      3. If neither exists, create a fresh empty database.
-      4. When creating the first Supabase row, persist that database there.
-
-    Existing Visto database categories are NOT changed.
+    Supabase is the persistent source of truth.
+    If its row does not exist, seed it with the current local JSON
+    database (or a fresh empty database if no local JSON exists).
     """
-    local = _load_local_database()
+    _test_supabase()
+
     remote = _load_supabase_database()
 
     if remote is not None:
-        print("[Database] Loaded from Supabase.")
         return remote
+
+    local = _load_local_database()
 
     if local is not None:
         print(
-            "[Database] Supabase is empty; "
-            "using local visto_data.json as the initial database."
+            "[VISTO] Seeding Supabase from local visto_data.json.",
+            flush=True,
         )
-
-        # The first run after migration seeds Supabase from the
-        # local database exactly as-is.
         _save_supabase_now(local)
         return local
 
     fresh = _empty_database()
 
     print(
-        "[Database] No existing database found; "
-        "creating a new persistent Supabase database."
+        "[VISTO] Creating first empty Supabase database row.",
+        flush=True,
     )
 
     _save_local_database(fresh)
@@ -321,8 +404,7 @@ db = load_database()
 
 def save_database():
     """
-    Keep the local JSON backup and persist the same exact db structure
-    to Supabase shortly afterward.
+    Save the same Visto database structure locally and remotely.
     """
     with DB_LOCK:
         snapshot = json.loads(
@@ -339,15 +421,18 @@ def _flush_database_on_exit():
             snapshot = json.loads(
                 json.dumps(db)
             )
+
         _save_local_database(snapshot)
         _save_supabase_now(snapshot)
+
     except Exception as error:
-        print(f"[Database] Shutdown save error: {error}")
+        print(
+            f"[VISTO] Shutdown save error: {error}",
+            flush=True,
+        )
 
 
-atexit.register(
-    _flush_database_on_exit
-)
+atexit.register(_flush_database_on_exit)
 
 
 def get_guild_data(category, guild_id):

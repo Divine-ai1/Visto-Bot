@@ -1,5 +1,6 @@
 import os
 import json
+import atexit
 import random
 import re
 import asyncio
@@ -13,7 +14,12 @@ from datetime import datetime, timezone, timedelta
 import discord
 from discord.ext import commands
 from discord import app_commands
-from supabase import create_client, Client
+
+try:
+    from supabase import create_client, Client
+except ImportError:
+    create_client = None
+    Client = object
 
 # ============================================================
 # CONFIG — EDIT THESE IN THIS FILE
@@ -69,174 +75,243 @@ DEFAULT_DATABASE = {
 }
 
 DB_FILE = "visto_data.json"
-DB_ROW_ID = 1
-DB_LOCK = threading.RLock()
-REMOTE_SAVE_LOCK = threading.Lock()
-REMOTE_SAVE_PENDING = None
-REMOTE_SAVE_WORKER_RUNNING = False
 
+# Supabase is the persistent source of truth.
+# Render Environment Variables:
+#   SUPABASE_URL
+#   SUPABASE_SECRET_KEY
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
+SUPABASE_ROW_ID = 1
 
-supabase: Client | None = None
+DB_LOCK = threading.RLock()
+_SUPABASE_SYNC_TIMER = None
+_SUPABASE_SYNC_TIMER_LOCK = threading.RLock()
+_SUPABASE_CLIENT = None
 
-if SUPABASE_URL and SUPABASE_SECRET_KEY:
+
+def _empty_database():
+    return {
+        key: {}
+        for key in DEFAULT_DATABASE
+    }
+
+
+def _normalize_database(loaded):
+    """Keep the existing Visto db structure exactly the same."""
+    if not isinstance(loaded, dict):
+        loaded = {}
+
+    for key in DEFAULT_DATABASE:
+        if not isinstance(loaded.get(key), dict):
+            loaded[key] = {}
+
+    return loaded
+
+
+def _get_supabase_client():
+    global _SUPABASE_CLIENT
+
+    if _SUPABASE_CLIENT is not None:
+        return _SUPABASE_CLIENT
+
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        return None
+
+    if create_client is None:
+        print("[Supabase] Python package is not installed.")
+        return None
+
     try:
-        supabase = create_client(
+        _SUPABASE_CLIENT = create_client(
             SUPABASE_URL,
             SUPABASE_SECRET_KEY,
         )
-        print("Supabase database connection configured.")
+        print("[Supabase] Connected.")
+        return _SUPABASE_CLIENT
     except Exception as error:
-        print(f"Supabase connection setup failed: {error}")
-        supabase = None
-else:
-    print("Supabase variables not found; using local database only.")
+        print(f"[Supabase] Connection error: {error}")
+        return None
 
 
-def _fresh_database():
-    return {k: {} for k in DEFAULT_DATABASE}
-
-
-def _normalize_database(data):
-    if not isinstance(data, dict):
-        data = {}
-    for key in DEFAULT_DATABASE:
-        if not isinstance(data.get(key), dict):
-            data[key] = {}
-    return data
-
-
-def _read_local_database():
+def _load_local_database():
     if not os.path.exists(DB_FILE):
         return None
+
     try:
-        with open(DB_FILE, "r", encoding="utf-8") as file:
-            return _normalize_database(json.load(file))
+        with open(
+            DB_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            return _normalize_database(
+                json.load(file)
+            )
     except Exception as error:
-        print(f"Local database load error: {error}")
+        print(f"[Database] Local JSON load error: {error}")
         return None
 
 
-def _write_local_database(data):
+def _save_local_database(snapshot):
     temporary = DB_FILE + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
-    os.replace(temporary, DB_FILE)
+
+    with open(
+        temporary,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            snapshot,
+            file,
+            indent=4,
+        )
+
+    os.replace(
+        temporary,
+        DB_FILE,
+    )
 
 
-def _remote_database():
-    if supabase is None:
+def _load_supabase_database():
+    client = _get_supabase_client()
+
+    if client is None:
         return None
+
     try:
         result = (
-            supabase
+            client
             .table("visto_database")
             .select("data")
-            .eq("id", DB_ROW_ID)
+            .eq("id", SUPABASE_ROW_ID)
             .limit(1)
             .execute()
         )
+
         rows = result.data or []
+
         if not rows:
             return None
-        return _normalize_database(rows[0].get("data"))
+
+        data = rows[0].get("data")
+
+        if not isinstance(data, dict):
+            return None
+
+        return _normalize_database(data)
+
     except Exception as error:
-        print(f"Supabase database read error: {error}")
+        print(f"[Supabase] Database load error: {error}")
         return None
 
 
-def _remote_has_data(data):
-    if not data:
+def _save_supabase_now(snapshot):
+    client = _get_supabase_client()
+
+    if client is None:
         return False
-    return any(bool(data.get(key)) for key in DEFAULT_DATABASE)
 
-
-def _write_remote_database(data):
-    if supabase is None:
-        return
     try:
         (
-            supabase
+            client
             .table("visto_database")
-            .upsert({
-                "id": DB_ROW_ID,
-                "data": data,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            .upsert(
+                {
+                    "id": SUPABASE_ROW_ID,
+                    "data": snapshot,
+                    "updated_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+                },
+                on_conflict="id",
+            )
             .execute()
         )
+
+        print("[Supabase] Database saved.")
+        return True
+
     except Exception as error:
-        print(f"Supabase database save error: {error}")
+        print(f"[Supabase] Database save error: {error}")
+        return False
 
 
-def _remote_save_worker():
-    global REMOTE_SAVE_PENDING, REMOTE_SAVE_WORKER_RUNNING
-
-    while True:
-        with REMOTE_SAVE_LOCK:
-            snapshot = REMOTE_SAVE_PENDING
-            REMOTE_SAVE_PENDING = None
-
-        if snapshot is None:
-            with REMOTE_SAVE_LOCK:
-                REMOTE_SAVE_WORKER_RUNNING = False
-            return
-
-        _write_remote_database(snapshot)
+def _supabase_sync_worker(snapshot):
+    try:
+        _save_supabase_now(snapshot)
+    except Exception as error:
+        print(f"[Supabase] Sync worker error: {error}")
 
 
-def _queue_remote_save(data):
-    global REMOTE_SAVE_PENDING, REMOTE_SAVE_WORKER_RUNNING
+def _schedule_supabase_sync():
+    """
+    Debounced remote save.
+    This avoids sending a Supabase request for every single message
+    while still persisting changes shortly after they happen.
+    """
+    global _SUPABASE_SYNC_TIMER
 
-    if supabase is None:
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
         return
 
-    with REMOTE_SAVE_LOCK:
-        REMOTE_SAVE_PENDING = json.loads(json.dumps(data))
+    with _SUPABASE_SYNC_TIMER_LOCK:
+        if _SUPABASE_SYNC_TIMER is not None:
+            try:
+                _SUPABASE_SYNC_TIMER.cancel()
+            except Exception:
+                pass
 
-        if REMOTE_SAVE_WORKER_RUNNING:
-            return
+        with DB_LOCK:
+            snapshot = json.loads(
+                json.dumps(db)
+            )
 
-        REMOTE_SAVE_WORKER_RUNNING = True
-        threading.Thread(
-            target=_remote_save_worker,
-            daemon=True,
-            name="supabase-save-worker",
-        ).start()
+        _SUPABASE_SYNC_TIMER = threading.Timer(
+            1.0,
+            _supabase_sync_worker,
+            args=(snapshot,),
+        )
+        _SUPABASE_SYNC_TIMER.daemon = True
+        _SUPABASE_SYNC_TIMER.start()
 
 
 def load_database():
-    # Priority 1: existing Supabase data.
-    remote = _remote_database()
-    if _remote_has_data(remote):
-        print("Loaded Visto database from Supabase.")
-        try:
-            _write_local_database(remote)
-        except Exception as error:
-            print(f"Local backup write error: {error}")
+    """
+    Startup order:
+      1. Load Supabase if the persistent row exists.
+      2. If Supabase is empty, use the local JSON backup if present.
+      3. If neither exists, create a fresh empty database.
+      4. When creating the first Supabase row, persist that database there.
+
+    Existing Visto database categories are NOT changed.
+    """
+    local = _load_local_database()
+    remote = _load_supabase_database()
+
+    if remote is not None:
+        print("[Database] Loaded from Supabase.")
         return remote
 
-    # Priority 2: existing local data. This is the one-time migration source.
-    local = _read_local_database()
     if local is not None:
-        print("Loaded Visto database from local JSON.")
-        if supabase is not None:
-            print("Uploading existing local database to Supabase...")
-            _write_remote_database(local)
-            print("Local database migration to Supabase complete.")
+        print(
+            "[Database] Supabase is empty; "
+            "using local visto_data.json as the initial database."
+        )
+
+        # The first run after migration seeds Supabase from the
+        # local database exactly as-is.
+        _save_supabase_now(local)
         return local
 
-    # Priority 3: brand-new empty database.
-    fresh = _fresh_database()
-    try:
-        _write_local_database(fresh)
-    except Exception as error:
-        print(f"Initial local database write error: {error}")
+    fresh = _empty_database()
 
-    # Never overwrite an existing remote database with an empty database.
-    if supabase is not None and not _remote_has_data(remote):
-        print("No existing database found; starting with an empty database.")
+    print(
+        "[Database] No existing database found; "
+        "creating a new persistent Supabase database."
+    )
+
+    _save_local_database(fresh)
+    _save_supabase_now(fresh)
 
     return fresh
 
@@ -245,14 +320,34 @@ db = load_database()
 
 
 def save_database():
-    # Every write keeps both the local backup and the persistent Supabase copy.
+    """
+    Keep the local JSON backup and persist the same exact db structure
+    to Supabase shortly afterward.
+    """
     with DB_LOCK:
-        snapshot = _normalize_database(db)
-        try:
-            _write_local_database(snapshot)
-        except Exception as error:
-            print(f"Local database save error: {error}")
-        _queue_remote_save(snapshot)
+        snapshot = json.loads(
+            json.dumps(db)
+        )
+        _save_local_database(snapshot)
+
+    _schedule_supabase_sync()
+
+
+def _flush_database_on_exit():
+    try:
+        with DB_LOCK:
+            snapshot = json.loads(
+                json.dumps(db)
+            )
+        _save_local_database(snapshot)
+        _save_supabase_now(snapshot)
+    except Exception as error:
+        print(f"[Database] Shutdown save error: {error}")
+
+
+atexit.register(
+    _flush_database_on_exit
+)
 
 
 def get_guild_data(category, guild_id):
@@ -260,7 +355,6 @@ def get_guild_data(category, guild_id):
     db.setdefault(category, {})
     db[category].setdefault(guild_id, {})
     return db[category][guild_id]
-
 
 # ============================================================
 # DISCORD CLIENT

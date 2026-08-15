@@ -3664,7 +3664,20 @@ class DashboardHandler(
     # --------------------------------------------------------
     # GET
     # --------------------------------------------------------
+def do_HEAD(self):
+    path = urlparse(self.path).path
 
+    if path == "/health":
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return
+
+    self.send_response(501)
+    self.end_headers()
+
+    
     def do_GET(self):
 
         path = urlparse(

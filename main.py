@@ -446,13 +446,6 @@ def _flush_database_on_exit():
 
 atexit.register(_flush_database_on_exit)
 
-def is_admin_or_bot_mod(member):
-    return (
-        member.guild_permissions.administrator
-        or any(role.id == BOT_MOD_ROLE_ID for role in member.roles)
-    )
-
-
 def get_guild_data(category, guild_id):
     guild_id = str(guild_id)
     db.setdefault(category, {})

@@ -1541,7 +1541,15 @@ async def unlockdown(interaction):
 
 @bot.tree.command(name="rename", description="Rename the current channel")
 @app_commands.describe(name="New channel name")
-@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.check(
+    lambda interaction: (
+        interaction.user.guild_permissions.administrator
+        or any(
+            role.id == TICKET_STAFF_ROLE_ID
+            for role in interaction.user.roles
+        )
+    )
+)
 async def rename_channel(interaction: discord.Interaction, name: str):
     name = name.strip()
 

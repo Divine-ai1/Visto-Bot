@@ -54,6 +54,16 @@ BUY_CATEGORY_ID = 1536720924039184404
 CLAIM_CATEGORY_ID = 1536695031199567882
 SUPPORT_CATEGORY_ID = 1536721072622149632
 TICKET_STAFF_ROLE_ID = 1536708388635803658
+BOT_MOD_ROLE_ID = 1536736701978910721
+
+def is_admin_or_bot_mod(interaction):
+    return (
+        interaction.user.guild_permissions.administrator
+        or any(
+            role.id == BOT_MOD_ROLE_ID
+            for role in interaction.user.roles
+        )
+    )
 
 if not TOKEN:
     raise RuntimeError(
@@ -433,6 +443,12 @@ def _flush_database_on_exit():
 
 
 atexit.register(_flush_database_on_exit)
+
+def is_admin_or_bot_mod(member):
+    return (
+        member.guild_permissions.administrator
+        or any(role.id == BOT_MOD_ROLE_ID for role in member.roles)
+    )
 
 
 def get_guild_data(category, guild_id):
@@ -2490,9 +2506,7 @@ stats_group = app_commands.Group(
         app_commands.Choice(name="Reset", value="reset"),
     ]
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
+@is_admin_or_bot_mod
 async def stats_messages(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],
@@ -2601,9 +2615,7 @@ async def stats_messages(
         app_commands.Choice(name="Reset", value="reset"),
     ]
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
+@is_admin_or_bot_mod
 async def stats_invites(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],

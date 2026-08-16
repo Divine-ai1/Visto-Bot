@@ -57,11 +57,13 @@ TICKET_STAFF_ROLE_ID = 1536708388635803658
 BOT_MOD_ROLE_ID = 1536736701978910721
 
 def is_admin_or_bot_mod(interaction):
+    member = interaction.user
+
     return (
-        interaction.user.guild_permissions.administrator
+        member.guild_permissions.administrator
         or any(
             role.id == BOT_MOD_ROLE_ID
-            for role in interaction.user.roles
+            for role in member.roles
         )
     )
 

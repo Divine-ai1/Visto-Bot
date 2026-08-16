@@ -2506,7 +2506,7 @@ stats_group = app_commands.Group(
         app_commands.Choice(name="Reset", value="reset"),
     ]
 )
-@is_admin_or_bot_mod
+@app_commands.check(is_admin_or_bot_mod)
 async def stats_messages(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],
@@ -2615,7 +2615,7 @@ async def stats_messages(
         app_commands.Choice(name="Reset", value="reset"),
     ]
 )
-@is_admin_or_bot_mod
+@app_commands.check(is_admin_or_bot_mod)
 async def stats_invites(
     interaction: discord.Interaction,
     action: app_commands.Choice[str],

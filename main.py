@@ -1833,37 +1833,136 @@ class TicketCloseConfirmView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
 
-    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger)
+    @discord.ui.button(
+        label="Confirm Close",
+        emoji="✅",
+        style=discord.ButtonStyle.danger,
+    )
     async def confirm(self, interaction, button):
-        reason = await ask_reason(interaction, "Close Ticket", "Enter the ticket closing reason")
-        channel = interaction.channel
-        owner_id = ticket_owner_id(channel)
-        owner = interaction.guild.get_member(owner_id) if owner_id else None
+        class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
+            reason = discord.ui.TextInput(
+                label="Closing Reason",
+                placeholder="Enter the ticket closing reason...",
+                required=True,
+                max_length=1000,
+                style=discord.TextStyle.paragraph,
+            )
 
-        if owner:
-            await safe_dm(owner, discord.Embed(title="🔒 Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
+            async def on_submit(self, modal_interaction):
+                reason = str(self.reason.value)
+                channel = modal_interaction.channel
+                owner_id = ticket_owner_id(channel)
+                owner = (
+                    modal_interaction.guild.get_member(owner_id)
+                    if owner_id
+                    else None
+                )
 
-        if owner:
-            await channel.set_permissions(owner, view_channel=False, send_messages=False)
-        settings = ticket_settings(interaction.guild)
-        if settings["staff_role"]:
-            role = interaction.guild.get_role(settings["staff_role"])
-            if role:
-                await channel.set_permissions(role, view_channel=True, send_messages=False, read_message_history=True)
+                await modal_interaction.response.defer(ephemeral=True)
 
-        await channel.edit(name=f"closed-{channel.name}"[:100], topic=f"VISTO_TICKET|{owner_id}|{ticket_type(channel)}|closed|{reason[:800]}")
-        db["tickets"].setdefault(str(interaction.guild.id), {}).setdefault(str(channel.id), {})["closed"] = True
-        db["tickets"][str(interaction.guild.id)][str(channel.id)]["close_reason"] = reason
-        save_database()
+                if owner:
+                    await safe_dm(
+                        owner,
+                        discord.Embed(
+                            title="🔒 Ticket Closed",
+                            description=(
+                                f"Your **{ticket_type(channel).title()}** ticket "
+                                f"in **{modal_interaction.guild.name}** was closed "
+                                f"by {modal_interaction.user.mention} "
+                                f'for "{reason}".'
+                            ),
+                            color=discord.Color.orange(),
+                        ),
+                    )
+                    await channel.set_permissions(
+                        owner,
+                        view_channel=False,
+                        send_messages=False,
+                    )
 
-        embed = discord.Embed(title="🔒 Ticket Closed", description=f"**Closed by:** {interaction.user.mention}\n**Reason:** {reason}\n\nThis ticket is now closed.", color=discord.Color.orange())
-        await channel.send(embed=embed, view=ClosedTicketView())
-        await interaction.response.edit_message(embed=success_embed("Ticket Closed", f"Closed for \"{reason}\"."), view=None)
-        await send_log(interaction.guild, "🔒 Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+                settings = ticket_settings(modal_interaction.guild)
+                if settings["staff_role"]:
+                    role = modal_interaction.guild.get_role(
+                        settings["staff_role"]
+                    )
+                    if role:
+                        await channel.set_permissions(
+                            role,
+                            view_channel=True,
+                            send_messages=False,
+                            read_message_history=True,
+                        )
 
-    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+                old_name = channel.name
+                closed_name = (
+                    old_name
+                    if old_name.startswith("closed-")
+                    else f"closed-{old_name}"
+                )
+
+                await channel.edit(
+                    name=closed_name[:100],
+                    topic=(
+                        f"VISTO_TICKET|{owner_id}|"
+                        f"{ticket_type(channel)}|closed|{reason[:800]}"
+                    ),
+                )
+
+                guild_id = str(modal_interaction.guild.id)
+                channel_id = str(channel.id)
+                db["tickets"].setdefault(guild_id, {})
+                db["tickets"][guild_id].setdefault(channel_id, {})
+                db["tickets"][guild_id][channel_id]["closed"] = True
+                db["tickets"][guild_id][channel_id]["close_reason"] = reason
+                save_database()
+
+                await channel.send(
+                    embed=discord.Embed(
+                        title="🔒 Ticket Closed",
+                        description=(
+                            f"**Closed by:** {modal_interaction.user.mention}\n"
+                            f"**Reason:** {reason}\n\n"
+                            "This ticket is now closed."
+                        ),
+                        color=discord.Color.orange(),
+                    ),
+                    view=ClosedTicketView(),
+                )
+
+                await modal_interaction.followup.send(
+                    embed=success_embed(
+                        "Ticket Closed",
+                        f'Closed for "{reason}".',
+                    ),
+                    ephemeral=True,
+                )
+
+                await send_log(
+                    modal_interaction.guild,
+                    "🔒 Ticket Closed",
+                    (
+                        f"**Channel:** {channel.mention}\n"
+                        f"**Closed by:** {modal_interaction.user.mention}\n"
+                        f"**Reason:** {reason}"
+                    ),
+                    discord.Color.orange(),
+                )
+
+        await interaction.response.send_modal(CloseReasonModal())
+
+    @discord.ui.button(
+        label="Cancel",
+        emoji="❌",
+        style=discord.ButtonStyle.secondary,
+    )
     async def cancel(self, interaction, button):
-        await interaction.response.edit_message(embed=info_embed("Close Cancelled", "The ticket remains open."), view=None)
+        await interaction.response.edit_message(
+            embed=info_embed(
+                "Close Cancelled",
+                "The ticket remains open.",
+            ),
+            view=None,
+        )
 
 
 class ClosedTicketView(discord.ui.View):
@@ -3677,12 +3776,12 @@ class DashboardHandler(
         self.end_headers()
 
     # --------------------------------------------------------
-    # GET
+    # HEAD / GET
     # --------------------------------------------------------
     def do_HEAD(self):
         path = urlparse(self.path).path
 
-        if path == "/health":
+        if path in ("/", "/health"):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", "0")
@@ -3698,8 +3797,8 @@ class DashboardHandler(
             self.path
         ).path
 
-        # Health checks
-        if path in ("/health", "/"):
+        # Render / UptimeRobot health checks
+        if path in ("/", "/health"):
 
             return self._send(
                 200,

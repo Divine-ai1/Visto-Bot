@@ -3679,28 +3679,27 @@ class DashboardHandler(
     # --------------------------------------------------------
     # GET
     # --------------------------------------------------------
-def do_HEAD(self):
-    path = urlparse(self.path).path
+    def do_HEAD(self):
+        path = urlparse(self.path).path
 
-    if path == "/health":
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", "0")
+        if path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        self.send_response(404)
         self.end_headers()
-        return
 
-    self.send_response(501)
-    self.end_headers()
-
-    
     def do_GET(self):
 
         path = urlparse(
             self.path
         ).path
 
-        # UptimeRobot
-        if path == "/health":
+        # Health checks
+        if path in ("/health", "/"):
 
             return self._send(
                 200,
@@ -5428,32 +5427,7 @@ async def on_resumed():
 # ============================================================
 # START
 # ============================================================
-async def discord_watchdog():
-    disconnected_for = 0
-
-    while True:
-        await asyncio.sleep(60)
-
-        if bot.is_ready():
-            disconnected_for = 0
-            continue
-
-        disconnected_for += 60
-        print(
-            f"[VISTO] Discord still disconnected for {disconnected_for}s",
-            flush=True
-        )
-
-        # Force Render to restart the process if Discord stays offline.
-        if disconnected_for >= 300:
-            print(
-                "[VISTO] Discord offline for 5 minutes. Restarting process...",
-                flush=True
-            )
-            os._exit(1)
-            
 async def main():
-    asyncio.create_task(discord_watchdog())
     await bot.start(TOKEN, reconnect=True)
 
 

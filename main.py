@@ -5383,7 +5383,13 @@ async def on_app_command_error(interaction, error):
 _persistent_views_registered = False
 
 @bot.event
-async def on_ready():
+async def on_disconnect():
+    print("[VISTO] Discord disconnected. Reconnecting...", flush=True)
+
+
+@bot.event
+async def on_resumed():
+    print("[VISTO] Discord connection resumed.", flush=True)
     print("=" * 60)
     print(f"Visto connected as {bot.user}")
     print(f"Guilds: {len(bot.guilds)}")
@@ -5422,9 +5428,33 @@ async def on_ready():
 # ============================================================
 # START
 # ============================================================
+async def discord_watchdog():
+    disconnected_for = 0
 
+    while True:
+        await asyncio.sleep(60)
+
+        if bot.is_ready():
+            disconnected_for = 0
+            continue
+
+        disconnected_for += 60
+        print(
+            f"[VISTO] Discord still disconnected for {disconnected_for}s",
+            flush=True
+        )
+
+        # Force Render to restart the process if Discord stays offline.
+        if disconnected_for >= 300:
+            print(
+                "[VISTO] Discord offline for 5 minutes. Restarting process...",
+                flush=True
+            )
+            os._exit(1)
+            
 async def main():
-    await bot.start(TOKEN)
+    asyncio.create_task(discord_watchdog())
+    await bot.start(TOKEN, reconnect=True)
 
 
 if __name__ == "__main__":

@@ -413,6 +413,10 @@ def load_database():
 
 db = load_database()
 
+# Prevent duplicate processing of the same Discord message during reconnects.
+_processed_message_ids = set()
+_PROCESSED_MESSAGE_LIMIT = 5000
+
 
 def save_database():
     """
@@ -944,6 +948,13 @@ def should_count_message(message):
 
 @bot.event
 async def on_message(message):
+    if message.id in _processed_message_ids:
+        return
+
+    _processed_message_ids.add(message.id)
+    if len(_processed_message_ids) > _PROCESSED_MESSAGE_LIMIT:
+        _processed_message_ids.clear()
+
     if should_count_message(message):
         guild_messages = get_guild_data("messages", message.guild.id)
         user_id = str(message.author.id)
@@ -1833,136 +1844,37 @@ class TicketCloseConfirmView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
 
-    @discord.ui.button(
-        label="Confirm Close",
-        emoji="✅",
-        style=discord.ButtonStyle.danger,
-    )
+    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
-        class CloseReasonModal(discord.ui.Modal, title="Close Ticket"):
-            reason = discord.ui.TextInput(
-                label="Closing Reason",
-                placeholder="Enter the ticket closing reason...",
-                required=True,
-                max_length=1000,
-                style=discord.TextStyle.paragraph,
-            )
+        reason = await ask_reason(interaction, "Close Ticket", "Enter the ticket closing reason")
+        channel = interaction.channel
+        owner_id = ticket_owner_id(channel)
+        owner = interaction.guild.get_member(owner_id) if owner_id else None
 
-            async def on_submit(self, modal_interaction):
-                reason = str(self.reason.value)
-                channel = modal_interaction.channel
-                owner_id = ticket_owner_id(channel)
-                owner = (
-                    modal_interaction.guild.get_member(owner_id)
-                    if owner_id
-                    else None
-                )
+        if owner:
+            await safe_dm(owner, discord.Embed(title="🔒 Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
 
-                await modal_interaction.response.defer(ephemeral=True)
+        if owner:
+            await channel.set_permissions(owner, view_channel=False, send_messages=False)
+        settings = ticket_settings(interaction.guild)
+        if settings["staff_role"]:
+            role = interaction.guild.get_role(settings["staff_role"])
+            if role:
+                await channel.set_permissions(role, view_channel=True, send_messages=False, read_message_history=True)
 
-                if owner:
-                    await safe_dm(
-                        owner,
-                        discord.Embed(
-                            title="🔒 Ticket Closed",
-                            description=(
-                                f"Your **{ticket_type(channel).title()}** ticket "
-                                f"in **{modal_interaction.guild.name}** was closed "
-                                f"by {modal_interaction.user.mention} "
-                                f'for "{reason}".'
-                            ),
-                            color=discord.Color.orange(),
-                        ),
-                    )
-                    await channel.set_permissions(
-                        owner,
-                        view_channel=False,
-                        send_messages=False,
-                    )
+        await channel.edit(name=f"closed-{channel.name}"[:100], topic=f"VISTO_TICKET|{owner_id}|{ticket_type(channel)}|closed|{reason[:800]}")
+        db["tickets"].setdefault(str(interaction.guild.id), {}).setdefault(str(channel.id), {})["closed"] = True
+        db["tickets"][str(interaction.guild.id)][str(channel.id)]["close_reason"] = reason
+        save_database()
 
-                settings = ticket_settings(modal_interaction.guild)
-                if settings["staff_role"]:
-                    role = modal_interaction.guild.get_role(
-                        settings["staff_role"]
-                    )
-                    if role:
-                        await channel.set_permissions(
-                            role,
-                            view_channel=True,
-                            send_messages=False,
-                            read_message_history=True,
-                        )
+        embed = discord.Embed(title="🔒 Ticket Closed", description=f"**Closed by:** {interaction.user.mention}\n**Reason:** {reason}\n\nThis ticket is now closed.", color=discord.Color.orange())
+        await channel.send(embed=embed, view=ClosedTicketView())
+        await interaction.response.edit_message(embed=success_embed("Ticket Closed", f"Closed for \"{reason}\"."), view=None)
+        await send_log(interaction.guild, "🔒 Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
 
-                old_name = channel.name
-                closed_name = (
-                    old_name
-                    if old_name.startswith("closed-")
-                    else f"closed-{old_name}"
-                )
-
-                await channel.edit(
-                    name=closed_name[:100],
-                    topic=(
-                        f"VISTO_TICKET|{owner_id}|"
-                        f"{ticket_type(channel)}|closed|{reason[:800]}"
-                    ),
-                )
-
-                guild_id = str(modal_interaction.guild.id)
-                channel_id = str(channel.id)
-                db["tickets"].setdefault(guild_id, {})
-                db["tickets"][guild_id].setdefault(channel_id, {})
-                db["tickets"][guild_id][channel_id]["closed"] = True
-                db["tickets"][guild_id][channel_id]["close_reason"] = reason
-                save_database()
-
-                await channel.send(
-                    embed=discord.Embed(
-                        title="🔒 Ticket Closed",
-                        description=(
-                            f"**Closed by:** {modal_interaction.user.mention}\n"
-                            f"**Reason:** {reason}\n\n"
-                            "This ticket is now closed."
-                        ),
-                        color=discord.Color.orange(),
-                    ),
-                    view=ClosedTicketView(),
-                )
-
-                await modal_interaction.followup.send(
-                    embed=success_embed(
-                        "Ticket Closed",
-                        f'Closed for "{reason}".',
-                    ),
-                    ephemeral=True,
-                )
-
-                await send_log(
-                    modal_interaction.guild,
-                    "🔒 Ticket Closed",
-                    (
-                        f"**Channel:** {channel.mention}\n"
-                        f"**Closed by:** {modal_interaction.user.mention}\n"
-                        f"**Reason:** {reason}"
-                    ),
-                    discord.Color.orange(),
-                )
-
-        await interaction.response.send_modal(CloseReasonModal())
-
-    @discord.ui.button(
-        label="Cancel",
-        emoji="❌",
-        style=discord.ButtonStyle.secondary,
-    )
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
-        await interaction.response.edit_message(
-            embed=info_embed(
-                "Close Cancelled",
-                "The ticket remains open.",
-            ),
-            view=None,
-        )
+        await interaction.response.edit_message(embed=info_embed("Close Cancelled", "The ticket remains open."), view=None)
 
 
 class ClosedTicketView(discord.ui.View):
@@ -3799,7 +3711,6 @@ class DashboardHandler(
 
         # Render / UptimeRobot health checks
         if path in ("/", "/health"):
-
             return self._send(
                 200,
                 "OK",
@@ -5474,11 +5385,14 @@ async def on_app_command_error(interaction, error):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+
 # ============================================================
-# READY
+# READY / CONNECTION
 # ============================================================
 
 _persistent_views_registered = False
+_ready_initialized = False
+
 
 @bot.event
 async def on_disconnect():
@@ -5486,47 +5400,54 @@ async def on_disconnect():
 
 
 @bot.event
-async def on_resumed():
-    print("[VISTO] Discord connection resumed.", flush=True)
+async def on_ready():
+    global _persistent_views_registered, _ready_initialized
+
     print("=" * 60)
     print(f"Visto connected as {bot.user}")
     print(f"Guilds: {len(bot.guilds)}")
     print("=" * 60)
-    try:
-        # Sync to the configured guild immediately so new slash commands
-        # like /delwarn and advanced /giveaway options appear without
-        # waiting for a global-command propagation delay.
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
-            bot.tree.copy_global_to(guild=guild_obj)
-            synced = await bot.tree.sync(guild=guild_obj)
-            print(f"Synced {len(synced)} slash commands to guild {GUILD_ID}.")
-        else:
-            synced = await bot.tree.sync()
-            print(f"Synced {len(synced)} global slash commands.")
-    except Exception as error:
-        print(f"Slash sync error: {error}")
+
+    if not _ready_initialized:
+        try:
+            if GUILD_ID:
+                guild_obj = discord.Object(id=GUILD_ID)
+                bot.tree.copy_global_to(guild=guild_obj)
+                synced = await bot.tree.sync(guild=guild_obj)
+                print(f"Synced {len(synced)} slash commands to guild {GUILD_ID}.")
+            else:
+                synced = await bot.tree.sync()
+                print(f"Synced {len(synced)} global slash commands.")
+        except Exception as error:
+            print(f"Slash sync error: {error}")
+
+        if not _persistent_views_registered:
+            view_guild = bot.guilds[0] if bot.guilds else None
+            bot.add_view(TicketPanelView(view_guild))
+            bot.add_view(TicketControlsView(view_guild))
+            bot.add_view(ClosedTicketView())
+            bot.add_view(GiveawayView(guild=view_guild))
+            _persistent_views_registered = True
+
+        _ready_initialized = True
 
     await cache_all_invites()
-    # Register persistent handlers once. New messages are created with the
-    # server's premium emojis; these generic views only handle interactions
-    # after a restart.
-    global _persistent_views_registered
-    if not _persistent_views_registered:
-        view_guild = bot.guilds[0] if bot.guilds else None
-        bot.add_view(TicketPanelView(view_guild))
-        bot.add_view(TicketControlsView(view_guild))
-        bot.add_view(ClosedTicketView())
-        bot.add_view(GiveawayView(guild=view_guild))
-        _persistent_views_registered = True
-    start_dashboard()
     await bot.change_presence(activity=discord.Game(name=".help • Visto"))
+
+
+@bot.event
+async def on_resumed():
+    print("[VISTO] Discord connection resumed.", flush=True)
+    await cache_all_invites()
 
 
 # ============================================================
 # START
 # ============================================================
+
 async def main():
+    # Start HTTP immediately so Render can mark the deployment healthy.
+    start_dashboard()
     await bot.start(TOKEN, reconnect=True)
 
 

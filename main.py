@@ -5477,15 +5477,22 @@ async def main():
                     f"Waiting {delay}s before retrying...",
                     flush=True,
                 )
+                # bot.start() leaves its internal aiohttp session open on a
+                # failed login. Close it before retrying or the sessions pile
+                # up ("Unclosed client session" warnings) and leak sockets.
+                await bot.close()
                 await asyncio.sleep(delay)
                 continue
+            await bot.close()
             raise
         except discord.errors.LoginFailure:
             # Bad token — retrying won't help, fail fast so Render shows the real error.
             print("[VISTO] Login failed: invalid TOKEN.", flush=True)
+            await bot.close()
             raise
 
     print("[VISTO] Exhausted all login retries. Exiting.", flush=True)
+    await bot.close()
 
 
 if __name__ == "__main__":

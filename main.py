@@ -499,6 +499,11 @@ PREMIUM_EMOJI_MARKUP = {
     "ban": "<:ban:1537389484662849536>",
     "ticket": "<:ticket:1537091039515385866>",
     "mod": "<:mod:1537091003306213416>",
+    "tick": "<:tick:1539191219115134976>",
+    "lock": "<:lock:1539191117692665936>",
+    "message": "<:message:1539191168657530890>",
+    "info": "<:info:1539191024440836157>",
+    "delete": "<:delete:1539190979360198686>",
 }
 
 
@@ -517,7 +522,7 @@ def premium_emoji_obj(guild, name, fallback=None):
 
 def success_embed(title, description):
     return discord.Embed(
-        title=f"✅ {title}",
+        title=f"{premium_emoji(None, 'tick')} {title}",
         description=description,
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc),
@@ -535,7 +540,7 @@ def error_embed(title, description):
 
 def info_embed(title, description):
     return discord.Embed(
-        title=f"ℹ️ {title}",
+        title=f"{premium_emoji(None, 'info')} {title}",
         description=description,
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
@@ -729,8 +734,9 @@ def get_daily_message_count(guild_id, user_id):
 
 def build_messages_embed(user, count, today_count, channel):
     arrow = premium_emoji(user.guild, "arrow")
+    message_emoji = premium_emoji(user.guild, "message")
     embed = discord.Embed(
-        title=f"{arrow} Message COUNT",
+        title=f"{message_emoji} Message COUNT",
         description=(
             f"{arrow} **All Time Messages:** `{count:,}`\n"
             f"{arrow} **Daily Messages:** `{today_count:,}`\n\n"
@@ -785,7 +791,7 @@ class MessageLeaderboardView(discord.ui.View):
             lines = ["No message statistics recorded yet."]
         channel = get_message_count_channel(self.guild)
         embed = discord.Embed(
-            title="📊 Message Leaderboard",
+            title=f"{premium_emoji(self.guild, 'message')} Message Leaderboard",
             description=(
                 f"Counting only {channel.mention if channel else 'the configured General channel'}.\n\n"
                 + "\n".join(lines)
@@ -868,7 +874,7 @@ class ResetAllView(discord.ui.View):
         self.reset_type = reset_type
         self.guild_id = guild_id
 
-    @discord.ui.button(label="Confirm Reset", emoji="🗑️", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirm Reset", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["delete"]), style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
@@ -890,7 +896,7 @@ class ResetAllView(discord.ui.View):
         await interaction.response.edit_message(embed=success_embed("Reset Complete", message), view=self)
         await send_log(
             interaction.guild,
-            "🗑️ Statistics Reset",
+            f"{premium_emoji(None, 'delete')} Statistics Reset",
             f"**Type:** {self.reset_type}\n**By:** {interaction.user.mention}\n**Scope:** Everyone",
             discord.Color.red(),
         )
@@ -1775,7 +1781,7 @@ class TicketControlsView(discord.ui.View):
         self.guild = guild
         self.claim_ticket.emoji = premium_emoji_obj(guild, "ticket")
         # Keep the close control readable with the normal lock icon.
-        self.close.emoji = "🔒"
+        self.close.emoji = discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["lock"])
 
     @discord.ui.button(label="Claim Ticket", emoji="👤", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
     async def claim_ticket(self, interaction, button):
@@ -1828,7 +1834,7 @@ class TicketControlsView(discord.ui.View):
         await channel.send(embed=embed)
         await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed", f"**Channel:** {channel.mention}\n**Claimed by:** {interaction.user.mention}", discord.Color.green())
 
-    @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
+    @discord.ui.button(label="Close Ticket", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["lock"]), style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
     async def close(self, interaction, button):
         if not is_ticket_channel(interaction.channel):
             return await interaction.response.send_message(embed=error_embed("Not A Ticket", "This is not a Visto ticket."), ephemeral=True)
@@ -1844,7 +1850,7 @@ class TicketCloseConfirmView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
 
-    @discord.ui.button(label="Confirm Close", emoji="✅", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirm Close", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["tick"]), style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
         reason = await ask_reason(interaction, "Close Ticket", "Enter the ticket closing reason")
         channel = interaction.channel
@@ -1852,7 +1858,7 @@ class TicketCloseConfirmView(discord.ui.View):
         owner = interaction.guild.get_member(owner_id) if owner_id else None
 
         if owner:
-            await safe_dm(owner, discord.Embed(title="🔒 Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
+            await safe_dm(owner, discord.Embed(title=f"{premium_emoji(None, 'lock')} Ticket Closed", description=f'Your **{ticket_type(channel).title()}** ticket in **{interaction.guild.name}** was closed by {interaction.user.mention} for "{reason}".', color=discord.Color.orange()))
 
         if owner:
             await channel.set_permissions(owner, view_channel=False, send_messages=False)
@@ -1867,10 +1873,10 @@ class TicketCloseConfirmView(discord.ui.View):
         db["tickets"][str(interaction.guild.id)][str(channel.id)]["close_reason"] = reason
         save_database()
 
-        embed = discord.Embed(title="🔒 Ticket Closed", description=f"**Closed by:** {interaction.user.mention}\n**Reason:** {reason}\n\nThis ticket is now closed.", color=discord.Color.orange())
+        embed = discord.Embed(title=f"{premium_emoji(None, 'lock')} Ticket Closed", description=f"**Closed by:** {interaction.user.mention}\n**Reason:** {reason}\n\nThis ticket is now closed.", color=discord.Color.orange())
         await channel.send(embed=embed, view=ClosedTicketView())
         await interaction.response.edit_message(embed=success_embed("Ticket Closed", f"Closed for \"{reason}\"."), view=None)
-        await send_log(interaction.guild, "🔒 Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+        await send_log(interaction.guild, f"{premium_emoji(None, 'lock')} Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
 
     @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
@@ -1881,7 +1887,7 @@ class ClosedTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Delete Ticket", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="visto_ticket_delete")
+    @discord.ui.button(label="Delete Ticket", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["delete"]), style=discord.ButtonStyle.danger, custom_id="visto_ticket_delete")
     async def delete(self, interaction, button):
         if not interaction.user.guild_permissions.manage_channels and not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(embed=error_embed("No Permission", "Only staff can delete closed tickets."), ephemeral=True)
@@ -5448,7 +5454,38 @@ async def on_resumed():
 async def main():
     # Start HTTP immediately so Render can mark the deployment healthy.
     start_dashboard()
-    await bot.start(TOKEN, reconnect=True)
+
+    # Discord's Cloudflare layer can return a 429 / "error 1015" rate limit
+    # on login if this IP has made too many login attempts recently. This is
+    # common on shared hosts like Render. Crashing immediately here causes
+    # Render to restart the process right away, which retries the login
+    # instantly and makes the block WORSE (each rapid retry can extend the
+    # Cloudflare ban). Instead, back off with increasing delays so we stop
+    # hammering the login endpoint and let the block expire naturally.
+    max_retries = 8
+    base_delay = 30  # seconds
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await bot.start(TOKEN, reconnect=True)
+            return  # bot.start only returns after a clean shutdown
+        except discord.errors.HTTPException as error:
+            if error.status == 429 and attempt < max_retries:
+                delay = min(base_delay * (2 ** (attempt - 1)), 900)  # cap at 15 min
+                print(
+                    f"[VISTO] Login rate limited (attempt {attempt}/{max_retries}). "
+                    f"Waiting {delay}s before retrying...",
+                    flush=True,
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise
+        except discord.errors.LoginFailure:
+            # Bad token — retrying won't help, fail fast so Render shows the real error.
+            print("[VISTO] Login failed: invalid TOKEN.", flush=True)
+            raise
+
+    print("[VISTO] Exhausted all login retries. Exiting.", flush=True)
 
 
 if __name__ == "__main__":

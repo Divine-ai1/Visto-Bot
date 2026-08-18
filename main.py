@@ -17,18 +17,18 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-try:
-    from supabase import create_client, Client
-except ImportError:
-    create_client = None
-    Client = object
 
 # ============================================================
 # CONFIG — EDIT THESE IN THIS FILE
 # ============================================================
 
-# Keep the Discord token in Render's secret/environment.
-TOKEN = os.getenv("TOKEN")
+# Discord token: any supported host can provide this as an environment variable.
+# Preferred name: DISCORD_TOKEN. BOT_TOKEN and the old TOKEN name are also accepted.
+TOKEN = (
+    os.getenv("DISCORD_TOKEN")
+    or os.getenv("BOT_TOKEN")
+    or os.getenv("TOKEN")
+)
 
 PREFIX = "."
 STATS_PREFIX = "-"
@@ -44,8 +44,13 @@ GUILD_ID = 0
 # DASHBOARD: edit the password HERE, not in an environment variable.
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD")
 DASHBOARD_HOST = "0.0.0.0"
-# Render exposes the web service port. The app still needs Render's PORT.
-DASHBOARD_PORT = int(os.getenv("PORT", "10000"))
+# Hosting port. Wispbyte may provide PORT; otherwise use 8080.
+# Discord itself does not require a port, but Visto's web dashboard does.
+DASHBOARD_PORT = int(
+    os.getenv("PORT")
+    or os.getenv("WISPBYTE_PORT")
+    or "8080"
+)
 
 DB_FILE = "visto_data.json"
 
@@ -69,7 +74,7 @@ def is_admin_or_bot_mod(interaction):
 
 if not TOKEN:
     raise RuntimeError(
-        "TOKEN was not found. Add TOKEN in Render Environment Variables."
+        "Discord token was not found. Add DISCORD_TOKEN in your hosting environment variables."
     )
 
 # ============================================================
@@ -520,6 +525,32 @@ def premium_emoji_obj(guild, name, fallback=None):
     return fallback
 
 
+DASHBOARD_EMOJI_IDS = {
+    "arrow": 1537111766989799604,
+    "giveaway": 1537091136244678716,
+    "warn": 1537389534688444437,
+    "ban": 1537389484662849536,
+    "ticket": 1537091039515385866,
+    "mod": 1537091003306213416,
+    "tick": 1539191219115134976,
+    "lock": 1539191117692665936,
+    "message": 1539191168657530890,
+    "info": 1539191024440836157,
+    "delete": 1539190979360198686,
+}
+
+
+def dashboard_emoji(name, size=18):
+    """Render a Visto custom emoji inside the HTML dashboard."""
+    emoji_id = DASHBOARD_EMOJI_IDS[name]
+    extension = "gif" if name in ("arrow", "giveaway") else "png"
+    return (
+        f'<img src="https://cdn.discordapp.com/emojis/{emoji_id}.{extension}" '
+        f'alt="{html.escape(name)}" width="{size}" height="{size}" '
+        f'style="vertical-align:middle;object-fit:contain;">'
+    )
+
+
 def success_embed(title, description):
     return discord.Embed(
         title=f"{premium_emoji(None, 'tick')} {title}",
@@ -531,7 +562,7 @@ def success_embed(title, description):
 
 def error_embed(title, description):
     return discord.Embed(
-        title=f"❌ {title}",
+        title=f"{premium_emoji(None, 'warn')} {title}",
         description=description,
         color=discord.Color.red(),
         timestamp=datetime.now(timezone.utc),
@@ -755,8 +786,8 @@ class MessageLeaderboardView(discord.ui.View):
         self.guild = ctx.guild
         self.page = 0
         self.per_page = 10
-        self.previous.emoji = premium_emoji_obj(self.guild, "arrow", "◀")
-        self.next.emoji = premium_emoji_obj(self.guild, "arrow", "▶")
+        self.previous.emoji = premium_emoji_obj(self.guild, "arrow")
+        self.next.emoji = premium_emoji_obj(self.guild, "arrow")
         self.refresh_buttons()
 
     def rows(self):
@@ -805,29 +836,29 @@ class MessageLeaderboardView(discord.ui.View):
         self.refresh_buttons()
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
-    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="First", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def first(self, interaction, button):
         self.page = 0
         await self.update(interaction)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Previous", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
         self.page = max(0, self.page - 1)
         await self.update(interaction)
 
-    @discord.ui.button(label="⏹", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Stop", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["lock"]), style=discord.ButtonStyle.secondary)
     async def stop_button(self, interaction, button):
         self.stop()
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         self.page = min(self.pages() - 1, self.page + 1)
         await self.update(interaction)
 
-    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Last", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def last(self, interaction, button):
         self.page = self.pages() - 1
         await self.update(interaction)
@@ -901,7 +932,7 @@ class ResetAllView(discord.ui.View):
             discord.Color.red(),
         )
 
-    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["delete"]), style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
         self.stop()
         for child in self.children:
@@ -1113,7 +1144,7 @@ async def on_member_join(member):
             save_database()
             await send_log(
                 guild,
-                "🔁 Member Rejoined",
+                f"{premium_emoji(guild, 'arrow')} Member Rejoined",
                 f"**Member:** {member.mention}\n**Inviter:** <@{inviter_id}>\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `1`",
                 discord.Color.blurple(),
             )
@@ -1132,7 +1163,7 @@ async def on_member_join(member):
             save_database()
             await send_log(
                 guild,
-                "📩 Member Joined Through Invite",
+                f"{premium_emoji(guild, 'message')} Member Joined Through Invite",
                 f"**Member:** {member.mention}\n**Inviter:** {used_invite.inviter.mention}\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `0`",
                 discord.Color.green(),
             )
@@ -1161,7 +1192,7 @@ async def on_member_remove(member):
         save_database()
         await send_log(
             guild,
-            "📤 Member Left",
+            f"{premium_emoji(guild, 'message')} Member Left",
             f"**Member:** <@{member.id}>\n**Inviter:** <@{inviter_id}>\n\n**Joins:** `{stats['joins']}`\n**Fake:** `{stats['fake']}`\n**Left:** `{stats['left']}`\n**Rejoin:** `0`",
             discord.Color.orange(),
         )
@@ -1289,7 +1320,7 @@ async def invited_prefix(ctx, member: discord.Member = None):
         )
 
     embed = discord.Embed(
-        title=f"📨 Members Invited by {member.display_name}",
+        title=f"{premium_emoji(ctx.guild, 'message')} Members Invited by {member.display_name}",
         description="\n".join(lines[:50]),
         color=VISTO_COLOR
     )
@@ -1345,7 +1376,7 @@ async def invited_slash(
         )
 
     embed = discord.Embed(
-        title=f"📨 Members Invited by {user.display_name}",
+        title=f"{premium_emoji(interaction.guild, 'message')} Members Invited by {user.display_name}",
         description="\n".join(lines[:50]),
         color=VISTO_COLOR
     )
@@ -1384,7 +1415,7 @@ async def unban(interaction, user_id: str, reason: str = "No reason provided"):
     try:
         target = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(target, reason=reason)
-        await safe_dm(target, discord.Embed(title="🔓 You were unbanned", description=f'You were unbanned from **{interaction.guild.name}** for "{reason}".', color=discord.Color.green()))
+        await safe_dm(target, discord.Embed(title=f"{premium_emoji(interaction.guild, 'tick')} You were unbanned", description=f'You were unbanned from **{interaction.guild.name}** for "{reason}".', color=discord.Color.green()))
         await interaction.response.send_message(embed=success_embed("Member Unbanned", f"**User:** {target.mention}\n**Reason:** {reason}"))
     except (ValueError, discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
         await interaction.response.send_message(embed=error_embed("Unban Failed", f"Could not unban that user. `{error}`"), ephemeral=True)
@@ -1394,11 +1425,11 @@ async def unban(interaction, user_id: str, reason: str = "No reason provided"):
 @app_commands.describe(user="Member", reason="Reason")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction, user: discord.Member, reason: str = "No reason provided"):
-    await safe_dm(user, discord.Embed(title="👢 You were kicked", description=f'You were kicked from **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
+    await safe_dm(user, discord.Embed(title=f"{premium_emoji(interaction.guild, 'ban')} You were kicked", description=f'You were kicked from **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
     try:
         await user.kick(reason=reason)
         await interaction.response.send_message(embed=success_embed("Member Kicked", f"**Member:** {user.mention}\n**Reason:** {reason}"))
-        await send_log(interaction.guild, "👢 Member Kicked", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ban')} Member Kicked", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
     except discord.Forbidden:
         await interaction.response.send_message(embed=error_embed("Kick Failed", "I don't have permission."), ephemeral=True)
 
@@ -1410,7 +1441,7 @@ async def timeout(interaction, user: discord.Member, duration: str, reason: str 
     seconds = duration_parser(duration)
     if seconds is None or seconds < 1 or seconds > 28 * 86400:
         return await interaction.response.send_message(embed=error_embed("Invalid Duration", "Use `10m`, `2h`, `1d`, etc. Maximum is 28 days."), ephemeral=True)
-    await safe_dm(user, discord.Embed(title="⏱️ You were timed out", description=f'You were timed out in **{interaction.guild.name}** for **{duration}** for "{reason}".', color=discord.Color.orange()))
+    await safe_dm(user, discord.Embed(title=f"{premium_emoji(interaction.guild, 'lock')} You were timed out", description=f'You were timed out in **{interaction.guild.name}** for **{duration}** for "{reason}".', color=discord.Color.orange()))
     try:
         await user.timeout(timedelta(seconds=seconds), reason=reason)
         await interaction.response.send_message(embed=success_embed("Member Timed Out", f"**Member:** {user.mention}\n**Duration:** `{duration}`\n**Reason:** {reason}"))
@@ -1430,9 +1461,9 @@ async def warn(interaction, user: discord.Member, reason: str):
         "timestamp": int(datetime.now(timezone.utc).timestamp()),
     })
     save_database()
-    await safe_dm(user, discord.Embed(title=f"{premium_emoji(interaction.guild, 'warn')} You were warned", description=f'You were warned in **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
+    await safe_dm(user, discord.Embed(title=f"{premium_emoji(guild, 'warn')} You were warned", description=f'You were warned in **{interaction.guild.name}** for "{reason}".', color=discord.Color.orange()))
     await interaction.response.send_message(embed=warning_embed("Member Warned", f"**Member:** {user.mention}\n**Reason:** {reason}"))
-    await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'warn')} Member Warned", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
+    await send_log(interaction.guild, f"{premium_emoji(guild, 'warn')} Member Warned", f"**Member:** {user.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
 
 
 @bot.tree.command(name="warnings", description="View warnings")
@@ -1760,7 +1791,7 @@ class TicketPanelView(discord.ui.View):
         )
         await channel.send(embed=embed, view=TicketControlsView(guild))
         await interaction.response.send_message(embed=success_embed("Ticket Created", f"Your ticket is {channel.mention}."), ephemeral=True)
-        await send_log(guild, f"{premium_emoji(guild, 'ticket', '🎫')} Ticket Created", f"**Type:** {kind}\n**User:** {interaction.user.mention}\n**Channel:** {channel.mention}")
+        await send_log(guild, f"{premium_emoji(guild, 'ticket')} Ticket Created", f"**Type:** {kind}\n**User:** {interaction.user.mention}\n**Channel:** {channel.mention}")
 
     @discord.ui.button(label="Buy", style=discord.ButtonStyle.success, custom_id="visto_ticket_buy")
     async def buy(self, interaction, button):
@@ -1783,7 +1814,7 @@ class TicketControlsView(discord.ui.View):
         # Keep the close control readable with the normal lock icon.
         self.close.emoji = discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["lock"])
 
-    @discord.ui.button(label="Claim Ticket", emoji="👤", style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
+    @discord.ui.button(label="Claim Ticket", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["ticket"]), style=discord.ButtonStyle.primary, custom_id="visto_ticket_claim_staff")
     async def claim_ticket(self, interaction, button):
         channel = interaction.channel
         if not is_ticket_channel(channel):
@@ -1813,7 +1844,7 @@ class TicketControlsView(discord.ui.View):
             self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket")
             button.label = "Claim Ticket"
             embed = discord.Embed(
-                title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Unclaimed",
+                title=f"{premium_emoji(interaction.guild, 'ticket')} Ticket Unclaimed",
                 description=f"{interaction.user.mention} has **unclaimed** this ticket. Another staff member can now claim it.",
                 color=discord.Color.orange(),
             )
@@ -1826,13 +1857,13 @@ class TicketControlsView(discord.ui.View):
         self.claim_ticket.emoji = premium_emoji_obj(interaction.guild, "ticket")
         button.label = "Claimed"
         embed = discord.Embed(
-            title=f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed",
+            title=f"{premium_emoji(interaction.guild, 'ticket')} Ticket Claimed",
             description=f"This ticket is being handled by **{interaction.user.mention}**.\n\nOnly the claiming staff member should take ownership of the conversation unless they unclaim it.",
             color=discord.Color.green(),
         )
         await interaction.response.edit_message(view=self)
         await channel.send(embed=embed)
-        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ticket', '🎫')} Ticket Claimed", f"**Channel:** {channel.mention}\n**Claimed by:** {interaction.user.mention}", discord.Color.green())
+        await send_log(interaction.guild, f"{premium_emoji(interaction.guild, 'ticket')} Ticket Claimed", f"**Channel:** {channel.mention}\n**Claimed by:** {interaction.user.mention}", discord.Color.green())
 
     @discord.ui.button(label="Close Ticket", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["lock"]), style=discord.ButtonStyle.danger, custom_id="visto_ticket_close")
     async def close(self, interaction, button):
@@ -1878,7 +1909,7 @@ class TicketCloseConfirmView(discord.ui.View):
         await interaction.response.edit_message(embed=success_embed("Ticket Closed", f"Closed for \"{reason}\"."), view=None)
         await send_log(interaction.guild, f"{premium_emoji(None, 'lock')} Ticket Closed", f"**Channel:** {channel.mention}\n**Closed by:** {interaction.user.mention}\n**Reason:** {reason}", discord.Color.orange())
 
-    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["delete"]), style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction, button):
         await interaction.response.edit_message(embed=info_embed("Close Cancelled", "The ticket remains open."), view=None)
 
@@ -1895,7 +1926,7 @@ class ClosedTicketView(discord.ui.View):
         await asyncio.sleep(3)
         await interaction.channel.delete()
 
-    @discord.ui.button(label="Transcript", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="visto_ticket_transcript")
+    @discord.ui.button(label="Transcript", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["message"]), style=discord.ButtonStyle.secondary, custom_id="visto_ticket_transcript")
     async def transcript(self, interaction, button):
         messages = []
         async for message in interaction.channel.history(limit=200, oldest_first=True):
@@ -1908,7 +1939,7 @@ class ClosedTicketView(discord.ui.View):
 @bot.tree.command(name="ticket_setup", description="Post the ticket panel")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def ticket_setup(interaction):
-    ticket_emoji = premium_emoji(interaction.guild, "ticket", "🎫")
+    ticket_emoji = premium_emoji(interaction.guild, "ticket")
     embed = discord.Embed(
         title=f"{ticket_emoji} Visto Tickets",
         description=(
@@ -1954,7 +1985,7 @@ async def user_add(interaction, user: discord.Member):
         return await interaction.response.send_message(embed=error_embed("Not A Ticket", "Use this inside a ticket."), ephemeral=True)
     await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
     await interaction.response.send_message(embed=success_embed("User Added", f"Added {user.mention} to {interaction.channel.mention}."))
-    await safe_dm(user, discord.Embed(title="🎫 Added To Ticket", description=f"You were added to {interaction.channel.mention} in **{interaction.guild.name}**.", color=discord.Color.blurple()))
+    await safe_dm(user, discord.Embed(title=f"{premium_emoji(interaction.guild, 'ticket')} Added To Ticket", description=f"You were added to {interaction.channel.mention} in **{interaction.guild.name}**.", color=discord.Color.blurple()))
 
 bot.tree.add_command(user_group)
 
@@ -1983,14 +2014,12 @@ def create_giveaway_embed(data, guild=None):
 
     giveaway_emoji = premium_emoji(
         guild,
-        "giveaway",
-        "🎉"
+        "giveaway"
     )
 
     arrow = premium_emoji(
         guild,
-        "arrow",
-        "➡️"
+        "arrow"
     )
 
     embed = discord.Embed(
@@ -2188,15 +2217,15 @@ class GiveawayParticipantsView(discord.ui.View):
         chunk = rows[self.page * self.per_page:(self.page + 1) * self.per_page]
         lines = []
         for index, (uid, amount, _) in enumerate(chunk, start=self.page * self.per_page + 1):
-            lines.append(f"{premium_emoji(self.guild, 'arrow', '➡️')} **#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
+            lines.append(f"{premium_emoji(self.guild, 'arrow')} **#{index}** <@{uid}> • `{amount}` {'entry' if amount == 1 else 'entries'}")
         if not lines:
             lines = ["No participants yet."]
         embed = discord.Embed(
-            title=f"{premium_emoji(self.guild, 'giveaway', '🎉')} Giveaway Participants",
+            title=f"{premium_emoji(self.guild, 'giveaway')} Giveaway Participants",
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        arrow = premium_emoji(self.guild, "arrow", "➡️")
+        arrow = premium_emoji(self.guild, "arrow")
         embed.add_field(name=f"{arrow} Total Participants", value=str(len(rows)), inline=True)
         embed.add_field(name=f"{arrow} Total Entries", value=str(sum(giveaway_entry_counts(data).values())), inline=True)
         embed.set_footer(text=f"Page {self.page + 1}/{pages}")
@@ -2206,12 +2235,12 @@ class GiveawayParticipantsView(discord.ui.View):
         self.refresh_buttons()
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
-    @discord.ui.button(label="Previous", emoji="➡️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Previous", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
         self.page = max(0, self.page - 1)
         await self.update(interaction)
 
-    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["arrow"]), style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         self.page = min(self.pages() - 1, self.page + 1)
         await self.update(interaction)
@@ -2225,7 +2254,7 @@ class GiveawayView(discord.ui.View):
         self.participants.emoji = premium_emoji_obj(guild, "giveaway")
         self.enter_button.disabled = disabled
 
-    @discord.ui.button(label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
+    @discord.ui.button(label="Enter Giveaway", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["giveaway"]), style=discord.ButtonStyle.success, custom_id="visto_giveaway_enter")
     async def enter_button(self, interaction, button):
         gid = str(interaction.message.id)
         data = db["giveaways"].get(gid)
@@ -2269,9 +2298,9 @@ class GiveawayView(discord.ui.View):
             await interaction.message.edit(embed=create_giveaway_embed(data, interaction.guild), view=self)
         except (discord.NotFound, discord.HTTPException):
             pass
-        await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or f"You entered the giveaway! {premium_emoji(interaction.guild, 'giveaway', '🎉')}"), ephemeral=True)
+        await interaction.response.send_message(embed=success_embed("Giveaway Entry", data.get("entry_confirmation") or f"You entered the giveaway! {premium_emoji(interaction.guild, 'giveaway')}"), ephemeral=True)
 
-    @discord.ui.button(label="Participants", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
+    @discord.ui.button(label="Participants", emoji=discord.PartialEmoji.from_str(PREMIUM_EMOJI_MARKUP["giveaway"]), style=discord.ButtonStyle.secondary, custom_id="visto_giveaway_participants")
     async def participants(self, interaction, button):
         data = db["giveaways"].get(str(interaction.message.id))
         if not data:
@@ -2311,14 +2340,14 @@ async def finish_giveaway(message_id, automatic=False):
         try:
             message = await channel.fetch_message(int(message_id))
             ended_embed = create_giveaway_embed(data, channel.guild)
-            ended_embed.title = f"{premium_emoji(channel.guild, 'giveaway', '🎉')} GIVEAWAY ENDED {premium_emoji(channel.guild, 'giveaway', '🎉')}"
+            ended_embed.title = f"{premium_emoji(channel.guild, 'giveaway')} GIVEAWAY ENDED {premium_emoji(channel.guild, 'giveaway')}"
             ended_embed.color = discord.Color.dark_gold()
             ended_embed.add_field(name="Status", value="Ended", inline=True)
             await message.edit(embed=ended_embed, view=GiveawayView(disabled=True, guild=channel.guild))
         except (discord.NotFound, discord.HTTPException):
             pass
         mentions = " ".join(f"<@{uid}>" for uid in winners) or "Nobody"
-        await channel.send(embed=discord.Embed(title="🏆 Giveaway Winner(s)", description=f"**Prize:** {data['prize']}\n**Winner(s):** {mentions}", color=discord.Color.gold()))
+        await channel.send(embed=discord.Embed(title=f"{premium_emoji(channel.guild, 'giveaway')} Giveaway Winner(s)", description=f"**Prize:** {data['prize']}\n**Winner(s):** {mentions}", color=discord.Color.gold()))
 
         for uid in winners:
             try:
@@ -2455,7 +2484,7 @@ async def giveaway_reroll(interaction, message_id: str):
     data["winners_selected"] = winners
     save_database()
     mentions = " ".join(f"<@{uid}>" for uid in winners)
-    await interaction.response.send_message(embed=discord.Embed(title="🔄 Giveaway Rerolled", description=f"**Prize:** {data['prize']}\n**New winner(s):** {mentions}", color=discord.Color.gold()))
+    await interaction.response.send_message(embed=discord.Embed(title=f"{premium_emoji(interaction.guild, 'giveaway')} Giveaway Rerolled", description=f"**Prize:** {data['prize']}\n**New winner(s):** {mentions}", color=discord.Color.gold()))
 
 
 @giveaway_group.command(name="pause", description="Pause an active giveaway")
@@ -2850,42 +2879,42 @@ def dashboard_page(
 
         <a href="?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            🏠 Overview
+            {dashboard_emoji("info")} Overview
         </a>
 
         <a href="/settings?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            ⚙️ Server Settings
+            {dashboard_emoji("mod")} Server Settings
         </a>
 
         <a href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            🛡️ Moderation
+            {dashboard_emoji("mod")} Moderation
         </a>
 
         <a href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            🎉 Giveaways
+            {dashboard_emoji("giveaway")} Giveaways
         </a>
 
         <a href="/tickets?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            🎫 Tickets
+            {dashboard_emoji("ticket")} Tickets
         </a>
 
         <a href="/autoresponders?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            🤖 Autoresponders
+            {dashboard_emoji("message")} Autoresponders
         </a>
 
         <a href="/statistics?key={html.escape(DASHBOARD_PASSWORD)}"
            class="nav-link">
-            📊 Statistics
+            {dashboard_emoji("message")} Statistics
         </a>
 
         <div class="sidebar-bottom">
             <a href="/health" class="nav-link">
-                🟢 Bot Health
+                {dashboard_emoji("tick")} Bot Health
             </a>
         </div>
 
@@ -3381,7 +3410,7 @@ async def dashboard_kick(
         await safe_dm(
             user,
             discord.Embed(
-                title="👢 You were kicked",
+                title=f"{premium_emoji(interaction.guild, 'ban')} You were kicked",
                 description=(
                     f'You were kicked from '
                     f'**{guild.name}** for "{reason}".'
@@ -3396,7 +3425,7 @@ async def dashboard_kick(
 
         await send_log(
             guild,
-            "👢 Member Kicked",
+            f"{premium_emoji(interaction.guild, 'ban')} Member Kicked",
             (
                 f"**Member:** {user.mention}\n"
                 f"**Reason:** {reason}\n"
@@ -3461,7 +3490,7 @@ async def dashboard_warn(
     await safe_dm(
         user,
         discord.Embed(
-            title=f"{premium_emoji(interaction.guild, 'warn')} You were warned",
+            title=f"{premium_emoji(guild, 'warn')} You were warned",
             description=(
                 f'You were warned in '
                 f'**{guild.name}** for "{reason}".'
@@ -3472,7 +3501,7 @@ async def dashboard_warn(
 
     await send_log(
         guild,
-        f"{premium_emoji(interaction.guild, 'warn')} Member Warned",
+        f"{premium_emoji(guild, 'warn')} Member Warned",
         (
             f"**Member:** {user.mention}\n"
             f"**Reason:** {reason}\n"
@@ -3564,7 +3593,7 @@ async def dashboard_create_giveaway(
             None,
 
         "entry_confirmation":
-            "You entered the giveaway! 🎉",
+            "You entered the giveaway!",
 
         "entries":
             [],
@@ -3606,7 +3635,7 @@ async def dashboard_create_giveaway(
 
     await send_log(
         guild,
-        "🎉 Giveaway Started",
+        f"{premium_emoji(guild, 'giveaway')} Giveaway Started",
         (
             f"**Prize:** {prize}\n"
             f"**Winners:** {winners}\n"
@@ -3715,7 +3744,7 @@ class DashboardHandler(
             self.path
         ).path
 
-        # Render / UptimeRobot health checks
+        # Health checks
         if path in ("/", "/health"):
             return self._send(
                 200,
@@ -3883,7 +3912,7 @@ onchange="location='/?key={html.escape(DASHBOARD_PASSWORD)}&guild_id='+this.valu
 
 <div class="card">
 
-<h2>⚡ Quick Actions</h2>
+<h2>{dashboard_emoji("arrow")} Quick Actions</h2>
 
 <p class="muted">
 Use the sections on the left to manage your server.
@@ -3891,23 +3920,23 @@ Use the sections on the left to manage your server.
 
 <a class="btn"
 href="/giveaways?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
-🎉 Create Giveaway
+{dashboard_emoji("giveaway")} Create Giveaway
 </a>
 
 <a class="btn btn-secondary"
 href="/moderation?key={html.escape(DASHBOARD_PASSWORD)}&guild_id={selected}">
-🛡️ Moderation
+{dashboard_emoji("mod")} Moderation
 </a>
 
 </div>
 
 <div class="card">
 
-<h2>🟢 Bot Status</h2>
+<h2>{dashboard_emoji("tick")} Bot Status</h2>
 
 <p>
 <strong>Online:</strong>
-✅
+{dashboard_emoji("tick")}
 </p>
 
 <p>
@@ -4110,7 +4139,7 @@ Manage members without opening Discord.
 
 <div class="card">
 
-<h2>🔨 Ban</h2>
+<h2>{dashboard_emoji("ban")} Ban</h2>
 
 <form method="POST"
 action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
@@ -4155,7 +4184,7 @@ Ban Member
 
 <div class="card">
 
-<h2>👢 Kick</h2>
+<h2>{dashboard_emoji("ban")} Kick</h2>
 
 <form method="POST"
 action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
@@ -4200,7 +4229,7 @@ Kick Member
 
 <div class="card">
 
-<h2>⚠️ Warn</h2>
+<h2>{dashboard_emoji("warn")} Warn</h2>
 
 <form method="POST"
 action="/moderation?key={html.escape(DASHBOARD_PASSWORD)}">
@@ -4343,7 +4372,7 @@ Create and manage giveaways from Visto Dashboard.
 
 <div class="card">
 
-<h2>🎉 Create Giveaway</h2>
+<h2>{dashboard_emoji("giveaway")} Create Giveaway</h2>
 
 <form method="POST"
 action="/giveaway?key={html.escape(DASHBOARD_PASSWORD)}">
@@ -4406,7 +4435,7 @@ placeholder="Giveaway Creator"
 
 <button
 class="btn-success">
-🎉 Start Giveaway
+{dashboard_emoji("giveaway")} Start Giveaway
 </button>
 
 </form>
@@ -4415,7 +4444,7 @@ class="btn-success">
 
 <div class="card">
 
-<h2>📋 Existing Giveaways</h2>
+<h2>{dashboard_emoji("giveaway")} Existing Giveaways</h2>
 
 <table>
 
@@ -4684,7 +4713,7 @@ Response
 <textarea
 name="response"
 required
-placeholder="Hey! 👋"
+placeholder="Hey!"
 ></textarea>
 
 <button class="btn-success">
@@ -4821,7 +4850,7 @@ Tracked Members
 
 <div class="card">
 
-<h2>📌 Message Channel</h2>
+<h2>{dashboard_emoji("message")} Message Channel</h2>
 
 <p class="muted">
 
@@ -4969,7 +4998,7 @@ to message statistics.
                         """
 <div class="card">
 
-<h2>✅ Settings Saved</h2>
+<h2>{dashboard_emoji("tick")} Settings Saved</h2>
 
 <p>
 Your server settings were updated.
@@ -5052,10 +5081,10 @@ Back to Dashboard
                     )
 
                 color = (
-                    "✅"
+                    dashboard_emoji("tick")
                     if success
                     else
-                    "❌"
+                    dashboard_emoji("delete")
                 )
 
                 return self._send(
@@ -5162,7 +5191,7 @@ Back to Moderation
 <div class="card">
 
 <h2>
-{"🎉" if success else "❌"}
+{dashboard_emoji("giveaway") if success else dashboard_emoji("delete")}
 Giveaway Result
 </h2>
 
@@ -5452,12 +5481,12 @@ async def on_resumed():
 # ============================================================
 
 async def main():
-    # Start HTTP immediately so Render can mark the deployment healthy.
+    # Start the dashboard HTTP server before connecting to Discord.
     start_dashboard()
 
     # Discord's Cloudflare layer can return a 429 / "error 1015" rate limit
     # on login if this IP has made too many login attempts recently. This is
-    # common on shared hosts like Render. Crashing immediately here causes
+    # common on shared hosts. Crashing immediately here causes
     # Render to restart the process right away, which retries the login
     # instantly and makes the block WORSE (each rapid retry can extend the
     # Cloudflare ban). Instead, back off with increasing delays so we stop
@@ -5486,7 +5515,7 @@ async def main():
             await bot.close()
             raise
         except discord.errors.LoginFailure:
-            # Bad token — retrying won't help, fail fast so Render shows the real error.
+            # Bad token — retrying won't help, fail fast so the hosting console shows the real error.
             print("[VISTO] Login failed: invalid TOKEN.", flush=True)
             await bot.close()
             raise
